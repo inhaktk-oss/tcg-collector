@@ -192,6 +192,58 @@ function getBackup() {
   try { return JSON.parse(localStorage.getItem('tcg_cards_backup') || 'null'); } catch { return null; }
 }
 
+// ─── Price Lookup: eBay + 130point ───
+const PRICE_SEARCH_SITES = [
+  {
+    key: 'ebay',
+    label: 'eBay',
+    emoji: '🛒',
+    color: '#e53238',
+    url: (name, cat) => {
+      const catKey = { pokemon: 'pokemon card', sports: 'sports card', yugioh: 'yugioh card', other: 'tcg card' };
+      const q = (catKey[cat] || 'tcg card') + ' ' + name;
+      return 'https://www.ebay.com/sch/i.html?_nkw=' + encodeURIComponent(q) + '&LH_Complete=1&LH_Sold=1&_sop=13';
+    },
+    desc: '판매 완료 가격 조회',
+  },
+  {
+    key: 'ebay-active',
+    label: 'eBay 현재',
+    emoji: '🏷️',
+    color: '#0064d2',
+    url: (name, cat) => {
+      const catKey = { pokemon: 'pokemon card', sports: 'sports card', yugioh: 'yugioh card', other: 'tcg card' };
+      const q = (catKey[cat] || 'tcg card') + ' ' + name;
+      return 'https://www.ebay.com/sch/i.html?_nkw=' + encodeURIComponent(q) + '&_sop=15';
+    },
+    desc: '현재 판매 중 매물 조회',
+  },
+  {
+    key: '130point',
+    label: '130point',
+    emoji: '📊',
+    color: '#ff6b35',
+    url: (name) => 'https://130point.com/bbs/search.php?sfl=wr_subject&stx=' + encodeURIComponent(name),
+    desc: '포켓몬카드 시세표',
+    onlyCat: ['pokemon'],
+  },
+];
+
+function PriceLookupButtons({ name, category, compact }) {
+  if (!name?.trim()) return null;
+  const sites = PRICE_SEARCH_SITES.filter(s => !s.onlyCat || s.onlyCat.includes(category));
+  return (
+    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: compact ? 4 : 8 }}>
+      {sites.map(s => (
+        <button key={s.key} type="button" onClick={() => window.open(s.url(name, category), '_blank')}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: compact ? '4px 8px' : '6px 12px', borderRadius: 8, border: `1px solid ${s.color}44`, background: `${s.color}15`, color: s.color, fontSize: compact ? 11 : 12, cursor: 'pointer', fontWeight: 600, whiteSpace: 'nowrap' }}>
+          {s.emoji} {s.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function LazyImage({ src, alt, className, style }) {
   const ref = useRef(null);
   const [visible, setVisible] = useState(false);
@@ -463,6 +515,12 @@ function App() {
               {selectedCard.price > 0 && selectedCard.soldPrice > 0 && <div style={{ fontSize: 11, color: selectedCard.soldPrice >= selectedCard.price ? '#10b981' : '#ef4444' }}>수익 {formatPrice(selectedCard.soldPrice - selectedCard.price)}</div>}
             </div>
           )}
+        </div>
+
+        {/* Price Lookup */}
+        <div style={{ background: '#0f172a', borderRadius: 10, padding: 12, marginBottom: 12 }}>
+          <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 6 }}>🔎 시세 조회</div>
+          <PriceLookupButtons name={selectedCard.name} category={selectedCard.category} />
         </div>
 
         {selectedCard.seller && (
@@ -1036,6 +1094,12 @@ function CardForm({ card, onSave, onCancel }) {
           <div className="form-field">
             <label>현재 시세 (원) — 선택사항</label>
             <input type="text" inputMode="numeric" value={currentValue ? Number(currentValue).toLocaleString('ko-KR') : ''} onChange={e => setCurrentValue(e.target.value.replace(/[^0-9]/g, ''))} placeholder="현재 시세 입력 (선택)" />
+            {name.trim() && (
+              <div style={{ marginTop: 6 }}>
+                <div style={{ fontSize: 11, color: '#64748b', marginBottom: 4 }}>시세 조회 후 입력하세요 👇</div>
+                <PriceLookupButtons name={name} category={category} compact />
+              </div>
+            )}
           </div>
         )}
 
