@@ -562,12 +562,34 @@ function PhotoCropper({ src, onCrop, onCancel }) {
   }
   function endDrag() { dragRef.current.dragging = false; }
 
+  const pinchRef = useRef({ active: false, startDist: 0, startScale: 1 });
+  function getTouchDist(t) { return Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY); }
+
   function handleMouseDown(e) { e.preventDefault(); startDrag(e.clientX, e.clientY); }
   function handleMouseMove(e) { moveDrag(e.clientX, e.clientY); }
   function handleMouseUp() { endDrag(); }
-  function handleTouchStart(e) { if (e.touches.length === 1) startDrag(e.touches[0].clientX, e.touches[0].clientY); }
-  function handleTouchMove(e) { if (e.touches.length === 1) { e.preventDefault(); moveDrag(e.touches[0].clientX, e.touches[0].clientY); } }
-  function handleTouchEnd() { endDrag(); }
+  function handleTouchStart(e) {
+    if (e.touches.length === 2) {
+      pinchRef.current = { active: true, startDist: getTouchDist(e.touches), startScale: scale };
+      endDrag();
+    } else if (e.touches.length === 1 && !pinchRef.current.active) {
+      startDrag(e.touches[0].clientX, e.touches[0].clientY);
+    }
+  }
+  function handleTouchMove(e) {
+    e.preventDefault();
+    if (e.touches.length === 2 && pinchRef.current.active) {
+      const dist = getTouchDist(e.touches);
+      const newScale = pinchRef.current.startScale * (dist / pinchRef.current.startDist);
+      setScale(Math.max(0.1, Math.min(5, newScale)));
+    } else if (e.touches.length === 1 && !pinchRef.current.active) {
+      moveDrag(e.touches[0].clientX, e.touches[0].clientY);
+    }
+  }
+  function handleTouchEnd(e) {
+    if (e.touches.length < 2) pinchRef.current.active = false;
+    if (e.touches.length === 0) endDrag();
+  }
 
   function doCrop() {
     const img = imgRef.current;
