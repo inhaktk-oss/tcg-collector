@@ -162,91 +162,79 @@ function App() {
 
   useEffect(() => { saveCards(cards); }, [cards]);
 
-  // Auto-pull from Gist on app load
-  useEffect(() => {
-    (async () => {
-      const cfg = getSyncConfig();
-      if (!cfg?.token || !cfg?.gistId) return;
-      try {
-        setSyncStatus('syncing');
-        const remote = await readGist(cfg.token, cfg.gistId);
-        if (remote?.cards?.length) {
-          const localStripped = stripPhotos(loadCards());
-          const merged = mergeCards(localStripped, remote.cards);
-          const localMap = new Map(loadCards().map(c => [c.id, c]));
-          const finalCards = merged.map(c => {
-            const loc = localMap.get(c.id);
-            return loc ? { ...c, photo: loc.photo } : c;
-          });
-          setCards(finalCards);
-        }
-        setSyncStatus('done');
-        setTimeout(() => setSyncStatus(''), 2000);
-      } catch { setSyncStatus(''); }
-    })();
-  }, []);
-
-  // Auto-sync after card changes (3s debounce)
-  const autoSync = useCallback(() => {
+  // ─── Full bidirectional sync (pull + push) ───
+  const syncingRef = useRef(false);
+  async function fullSync(silent) {
     const cfg = getSyncConfig();
-    if (!cfg?.token || !cfg?.gistId) return;
-    if (syncTimer.current) clearTimeout(syncTimer.current);
-    syncTimer.current = setTimeout(async () => {
-      try {
-        setSyncStatus('syncing');
-        const remote = await readGist(cfg.token, cfg.gistId);
-        const localStripped = stripPhotos(loadCards());
-        const merged = mergeCards(localStripped, remote?.cards || []);
-        await writeGist(cfg.token, cfg.gistId, { cards: merged, lastSync: Date.now() });
-        // Merge back remote-only cards (without overwriting local photos)
-        const localMap = new Map(loadCards().map(c => [c.id, c]));
-        const finalCards = merged.map(c => {
-          const loc = localMap.get(c.id);
-          return loc ? { ...c, photo: loc.photo } : c;
-        });
-        setCards(finalCards);
-        setSyncStatus('done');
-        setTimeout(() => setSyncStatus(''), 2000);
-      } catch { setSyncStatus('error'); setTimeout(() => setSyncStatus(''), 3000); }
-    }, 3000);
-  }, []);
-
-  // Trigger auto-sync on card changes
-  const prevCount = useRef(cards.length);
-  useEffect(() => {
-    if (prevCount.current !== cards.length) { autoSync(); }
-    prevCount.current = cards.length;
-  }, [cards.length, autoSync]);
-
-  // Manual sync
-  async function doSync() {
-    const cfg = getSyncConfig();
-    if (!cfg?.token) { setScreen('sync'); return; }
+    if (!cfg?.token || !cfg?.gistId || syncingRef.current) return;
+    syncingRef.current = true;
     try {
-      setSyncStatus('syncing');
-      let gistId = cfg.gistId;
-      if (!gistId) {
-        const existing = await findGist(cfg.token);
-        if (existing) { gistId = existing.id; }
-        else {
-          const created = await createGist(cfg.token, { cards: stripPhotos(cards), lastSync: Date.now() });
-          gistId = created.id;
-        }
-        saveSyncConfig({ ...cfg, gistId });
-      }
-      const remote = await readGist(cfg.token, gistId);
-      const localStripped = stripPhotos(cards);
+      if (!silent) setSyncStatus('syncing');
+      const remote = await readGist(cfg.token, cfg.gistId);
+      const localStripped = stripPhotos(loadCards());
       const merged = mergeCards(localStripped, remote?.cards || []);
-      await writeGist(cfg.token, gistId, { cards: merged, lastSync: Date.now() });
-      const localMap = new Map(cards.map(c => [c.id, c]));
+      // Only write if there are actual changes
+      const remoteJSON = JSON.stringify(remote?.cards || []);
+      const mergedJSON = JSON.stringify(merged);
+      if (mergedJSON !== remoteJSON) {
+        await writeGist(cfg.token, cfg.gistId, { cards: merged, lastSync: Date.now() });
+      }
+      const localMap = new Map(loadCards().map(c => [c.id, c]));
       const finalCards = merged.map(c => {
         const loc = localMap.get(c.id);
         return loc ? { ...c, photo: loc.photo } : c;
       });
       setCards(finalCards);
-      setSyncStatus('done');
-      setTimeout(() => setSyncStatus(''), 2000);
-    } catch(e) { setSyncStatus('error'); setTimeout(() => setSyncStatus(''), 3000); }
+      if (!silent) { setSyncStatus('done'); setTimeout(() => setSyncStatus(''), 2000); }
+    } catch {
+      if (!silent) { setSyncStatus('error'); setTimeout(() => setSyncStatus(''), 3000); }
+    } finally { syncingRef.current = false; }
+  }
+
+  // Auto-sync on app load
+  useEffect(() => { fullSync(false); }, []);
+
+  // Auto-sync after ANY card change (3s debounce)
+  const prevCardsJSON = useRef('');
+  useEffect(() => {
+    const json = JSON.stringify(stripPhotos(cards));
+    if (prevCardsJSON.current && json !== prevCardsJSON.current) {
+      if (syncTimer.current) clearTimeout(syncTimer.current);
+      syncTimer.current = setTimeout(() => fullSync(true), 2000);
+    }
+    prevCardsJSON.current = json;
+  }, [cards]);
+
+  // Periodic polling every 30s for remote changes
+  useEffect(() => {
+    const interval = setInterval(() => fullSync(true), 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Sync when tab becomes visible (switching back from other app/tab)
+  useEffect(() => {
+    function onVisible() { if (document.visibilityState === 'visible') fullSync(true); }
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+
+  // Manual sync
+  async function doSync() {
+    const cfg = getSyncConfig();
+    if (!cfg?.token) { setScreen('sync'); return; }
+    if (!cfg.gistId) {
+      try {
+        setSyncStatus('syncing');
+        const existing = await findGist(cfg.token);
+        let gistId = existing ? existing.id : null;
+        if (!gistId) {
+          const created = await createGist(cfg.token, { cards: stripPhotos(cards), lastSync: Date.now() });
+          gistId = created.id;
+        }
+        saveSyncConfig({ ...cfg, gistId });
+      } catch(e) { setSyncStatus('error'); setTimeout(() => setSyncStatus(''), 3000); return; }
+    }
+    await fullSync(false);
   }
 
   const filtered = useMemo(() => {
