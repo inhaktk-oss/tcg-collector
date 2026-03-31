@@ -281,6 +281,22 @@ function App() {
       } catch(e) { setSyncStatus('error'); setTimeout(() => setSyncStatus(''), 3000); return; }
     }
     await pushToGist();
+  }
+
+  const filtered = useMemo(() => {
+    let list = [...cards];
+    if (filter !== 'all') list = list.filter(c => c.category === filter);
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      list = list.filter(c => c.name.toLowerCase().includes(q) || (c.memo || '').toLowerCase().includes(q) || (c.seller || '').toLowerCase().includes(q));
+    }
+    switch (sort) {
+      case 'oldest': list.sort((a, b) => a.createdAt - b.createdAt); break;
+      case 'price-high': list.sort((a, b) => (b.price || 0) - (a.price || 0)); break;
+      case 'price-low': list.sort((a, b) => (a.price || 0) - (b.price || 0)); break;
+      case 'name': list.sort((a, b) => a.name.localeCompare(b.name, 'ko')); break;
+      default: list.sort((a, b) => b.createdAt - a.createdAt);
+    }
     return list;
   }, [cards, filter, search, sort]);
 
