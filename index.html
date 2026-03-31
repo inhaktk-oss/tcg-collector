@@ -202,38 +202,39 @@ function App() {
       if (!silent) setSyncStatus('syncing');
       const remote = await readGist(cfg.token, cfg.gistId);
       const localCards = loadCards();
-      const localForMerge = localCards.map(({ photo, ...rest }) => rest);
-      const remoteForMerge = (remote?.cards || []).map(({ syncPhoto, ...rest }) => rest);
-      const merged = mergeCards(localForMerge, remoteForMerge);
 
-      // Build sync payload with compressed photos
-      const localPrepped = await prepareForSync(localCards);
-      const localSyncMap = new Map(localPrepped.map(c => [c.id, c.syncPhoto]));
-      const remoteSyncMap = new Map((remote?.cards || []).map(c => [c.id, c.syncPhoto || '']));
-      const syncCards = merged.map(c => ({
-        ...c, 
-        syncPhoto: localSyncMap.get(c.id) || remoteSyncMap.get(c.id) || ''
-      }));
+      // Merge using data fields only (no photo/syncPhoto in merge comparison)
+      const strip = c => { const { photo, syncPhoto, ...rest } = c; return rest; };
+      const merged = mergeCards(localCards.map(strip), (remote?.cards || []).map(strip));
 
-      // Only write if changed
-      const remoteJSON = JSON.stringify(remote?.cards || []);
-      const syncJSON = JSON.stringify(syncCards);
-      if (syncJSON !== remoteJSON) {
-        await writeGist(cfg.token, cfg.gistId, { cards: syncCards, lastSync: Date.now() });
+      // Build photo maps
+      const localPhotoMap = new Map(localCards.filter(c => c.photo).map(c => [c.id, c.photo]));
+      const remoteSyncPhotoMap = new Map((remote?.cards || []).filter(c => c.syncPhoto).map(c => [c.id, c.syncPhoto]));
+
+      // Compress local photos for sync upload
+      const syncPhotoMap = new Map();
+      for (const c of localCards) {
+        if (c.photo) syncPhotoMap.set(c.id, await compressPhoto(c.photo));
       }
 
-      // Merge back: keep local photo if exists, otherwise use syncPhoto from remote
-      const localMap = new Map(localCards.map(c => [c.id, c]));
-      const finalCards = merged.map(c => {
-        const loc = localMap.get(c.id);
-        if (loc?.photo) return { ...c, photo: loc.photo };
-        // Use remote syncPhoto as local photo (compressed but better than nothing)
-        const rSync = remoteSyncMap.get(c.id);
-        return { ...c, photo: rSync || '' };
-      });
+      // Gist payload: data + syncPhoto (compressed)
+      const syncCards = merged.map(c => ({
+        ...c,
+        syncPhoto: syncPhotoMap.get(c.id) || remoteSyncPhotoMap.get(c.id) || ''
+      }));
+
+      // Write to Gist
+      await writeGist(cfg.token, cfg.gistId, { cards: syncCards, lastSync: Date.now() });
+
+      // Final local cards: keep original photo, or use remote syncPhoto
+      const finalCards = merged.map(c => ({
+        ...c,
+        photo: localPhotoMap.get(c.id) || remoteSyncPhotoMap.get(c.id) || ''
+      }));
       setCards(finalCards);
       if (!silent) { setSyncStatus('done'); setTimeout(() => setSyncStatus(''), 2000); }
-    } catch {
+    } catch(e) {
+      console.error('Sync error:', e);
       if (!silent) { setSyncStatus('error'); setTimeout(() => setSyncStatus(''), 3000); }
     } finally { syncingRef.current = false; }
   }
