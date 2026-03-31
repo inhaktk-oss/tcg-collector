@@ -602,10 +602,12 @@ function PhotoCropper({ src, onCrop, onCancel }) {
           </button>
         ))}
       </div>
-      <div style={{ padding: '4px 16px 8px', textAlign: 'center' }}>
-        <input type="range" min="10" max="300" value={Math.round(scale * 100)} onChange={e => setScale(e.target.value / 100)}
-          style={{ width: '60%', maxWidth: 250, accentColor: '#6366f1' }} />
-        <span style={{ color: '#64748b', fontSize: 12, marginLeft: 8 }}>{Math.round(scale * 100)}%</span>
+      <div style={{ padding: '4px 16px 8px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8 }}>
+        <button onClick={() => setScale(s => Math.max(0.1, s - 0.1))} style={{ background: '#334155', border: 'none', color: 'white', width: 36, height: 36, borderRadius: 8, fontSize: 18, cursor: 'pointer', fontWeight: 700 }}>−</button>
+        <button onClick={() => setScale(s => Math.max(0.1, s - 0.02))} style={{ background: '#334155', border: 'none', color: '#94a3b8', width: 30, height: 30, borderRadius: 6, fontSize: 13, cursor: 'pointer' }}>−</button>
+        <span style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, minWidth: 48, textAlign: 'center' }}>{Math.round(scale * 100)}%</span>
+        <button onClick={() => setScale(s => Math.min(5, s + 0.02))} style={{ background: '#334155', border: 'none', color: '#94a3b8', width: 30, height: 30, borderRadius: 6, fontSize: 13, cursor: 'pointer' }}>+</button>
+        <button onClick={() => setScale(s => Math.min(5, s + 0.1))} style={{ background: '#334155', border: 'none', color: 'white', width: 36, height: 36, borderRadius: 8, fontSize: 18, cursor: 'pointer', fontWeight: 700 }}>+</button>
       </div>
       <div ref={containerRef} style={{ flex: 1, position: 'relative', overflow: 'hidden', touchAction: 'none', cursor: 'grab' }}
         onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}
@@ -681,10 +683,10 @@ function CardForm({ card, onSave, onCancel }) {
         <div style={{ width: 50 }}></div>
       </div>
 
-      <form onSubmit={handleSubmit}>
-        {/* Photo Cropper Modal */}
-        {cropSrc && <PhotoCropper src={cropSrc} onCrop={(result) => { setPhoto(result); setCropSrc(null); }} onCancel={() => setCropSrc(null)} />}
+      {/* Photo Cropper Modal - outside form to avoid submit */}
+      {cropSrc && <PhotoCropper src={cropSrc} onCrop={(result) => { setPhoto(result); setCropSrc(null); }} onCancel={() => setCropSrc(null)} />}
 
+      <form onSubmit={handleSubmit}>
         {/* Photo */}
         <div style={{ marginBottom: 16, textAlign: 'center' }}>
           {photo ? (
