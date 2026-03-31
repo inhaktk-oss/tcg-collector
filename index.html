@@ -110,7 +110,28 @@ async function readGistVersion(token, gistId, sha) {
   const raw = g.files[GIST_FILENAME]?.content;
   return raw ? JSON.parse(raw) : null;
 }
-function mergeCards(local, remote) { return local; } // unused, kept for compat
+// Merge two card arrays by ID: keep both sides, prefer newer for conflicts
+function mergeCards(local, remote) {
+  const map = new Map();
+  // Add all local cards first
+  for (const c of local) map.set(c.id, c);
+  // Merge remote: if same ID exists, keep the one with newer updatedAt/createdAt
+  for (const c of remote) {
+    const existing = map.get(c.id);
+    if (!existing) {
+      map.set(c.id, c); // remote-only card → add
+    } else {
+      const localTime = existing.updatedAt || existing.createdAt || 0;
+      const remoteTime = c.updatedAt || c.createdAt || 0;
+      if (remoteTime > localTime) {
+        // Remote is newer — keep remote data but preserve local full-res photo
+        map.set(c.id, { ...c, photo: existing.photo || c.photo || '' });
+      }
+      // else keep local (already in map)
+    }
+  }
+  return Array.from(map.values()).sort((a, b) => b.createdAt - a.createdAt);
+}
 
 // Compress photo for sync (max 400px, JPEG 55%)
 function compressPhoto(dataUrl) {
@@ -309,7 +330,7 @@ function App() {
     } finally { syncingRef.current = false; }
   }
 
-  // PULL: download cards from Gist and replace local
+  // PULL: download cards from Gist and MERGE with local
   async function pullFromGist(silent) {
     const cfg = getSyncConfig();
     if (!cfg?.token || !cfg?.gistId || syncingRef.current) return;
@@ -325,13 +346,15 @@ function App() {
         await pushToGist();
         return;
       }
-      // Build local cards from remote: use syncPhoto as photo
       const localCards = loadCards();
+      // Restore photos: prefer local full-res, fallback to syncPhoto
       const localPhotoMap = new Map(localCards.filter(c => c.photo).map(c => [c.id, c.photo]));
-      const finalCards = remoteCards.map(c => {
+      const remoteWithPhotos = remoteCards.map(c => {
         const { syncPhoto, ...data } = c;
         return { ...data, photo: localPhotoMap.get(c.id) || syncPhoto || '' };
-      }).sort((a, b) => b.createdAt - a.createdAt);
+      });
+      // Merge: keep both local-only and remote-only cards
+      const finalCards = mergeCards(localCards, remoteWithPhotos);
       setCards(finalCards);
       if (!silent) { setSyncStatus('done'); setTimeout(() => setSyncStatus(''), 1500); }
     } catch(e) {
