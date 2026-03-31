@@ -109,21 +109,21 @@ const CATEGORIES = [
   { value: 'other', label: '기타', emoji: '🎴', badge: 'badge-other' },
 ];
 
-const GRADES = [
-  '', 
-  'PSA 10', 'PSA 9', 'PSA 8', 'PSA 8미만',
-  'BGS 10', 'BGS 9.5', 'BGS 9', 'BGS 8.5', 'BGS 8', 'BGS 8미만',
-  'CGC 10', 'CGC 9.5', 'CGC 9', 'CGC 8.5', 'CGC 8', 'CGC 8미만',
-  'BRG 10', 'BRG 9.5', 'BRG 9', 'BRG 8.5', 'BRG 8', 'BRG 8미만',
-  'Raw(미등급)',
-];
-const GRADE_GROUPS = [
-  { label: 'PSA', grades: ['PSA 10', 'PSA 9', 'PSA 8', 'PSA 8미만'] },
-  { label: 'BGS', grades: ['BGS 10', 'BGS 9.5', 'BGS 9', 'BGS 8.5', 'BGS 8', 'BGS 8미만'] },
-  { label: 'CGC', grades: ['CGC 10', 'CGC 9.5', 'CGC 9', 'CGC 8.5', 'CGC 8', 'CGC 8미만'] },
-  { label: 'BRG', grades: ['BRG 10', 'BRG 9.5', 'BRG 9', 'BRG 8.5', 'BRG 8', 'BRG 8미만'] },
-  { label: '기타', grades: ['Raw(미등급)'] },
-];
+const GRADE_COMPANIES = ['PSA', 'BGS', 'SGC', 'CGC', 'BRG', '기타'];
+const GRADE_SCORES = [10, 9.5, 9, 8.5, 8, 7.5, 7, 6.5, 6, 5.5, 5, 4.5, 4, 3.5, 3, 2.5, 2, 1.5, 1, 0.5, 0];
+function parseGrade(grade) {
+  if (!grade) return { company: '', score: '' };
+  if (grade === 'RAW카드' || grade === 'Raw(미등급)') return { company: 'RAW카드', score: '' };
+  const match = grade.match(/^(\S+)\s+(.+)$/);
+  if (match) return { company: match[1], score: match[2] };
+  return { company: grade, score: '' };
+}
+function buildGrade(company, score) {
+  if (!company) return '';
+  if (company === 'RAW카드') return 'RAW카드';
+  if (score === '' || score === undefined) return company;
+  return company + ' ' + score;
+}
 const SORT_OPTIONS = [
   { value: 'newest', label: '최근 등록순' },
   { value: 'oldest', label: '오래된순' },
@@ -497,7 +497,9 @@ function App() {
 function CardForm({ card, onSave, onCancel }) {
   const [name, setName] = useState(card?.name || '');
   const [category, setCategory] = useState(card?.category || 'pokemon');
-  const [grade, setGrade] = useState(card?.grade || '');
+  const _pg = parseGrade(card?.grade || '');
+  const [gradeCompany, setGradeCompany] = useState(_pg.company);
+  const [gradeScore, setGradeScore] = useState(_pg.score);
   const [purchaseDate, setPurchaseDate] = useState(card?.purchaseDate || new Date().toISOString().slice(0, 10));
   const [price, setPrice] = useState(card?.price?.toString() || '');
   const [seller, setSeller] = useState(card?.seller || '');
@@ -521,7 +523,7 @@ function CardForm({ card, onSave, onCancel }) {
       ...(card || {}),
       name: name.trim(),
       category,
-      grade,
+      grade: buildGrade(gradeCompany, gradeScore),
       purchaseDate,
       price: price ? parseInt(price.replace(/[^0-9]/g, '')) : 0,
       seller: seller.trim(),
@@ -583,14 +585,23 @@ function CardForm({ card, onSave, onCancel }) {
         {/* Grade */}
         <div className="form-field">
           <label>등급</label>
-          <select value={grade} onChange={e => setGrade(e.target.value)}>
-            <option value="">선택 안 함</option>
-            {GRADE_GROUPS.map(group => (
-              <optgroup key={group.label} label={group.label}>
-                {group.grades.map(g => <option key={g} value={g}>{g}</option>)}
-              </optgroup>
-            ))}
-          </select>
+          <div className="form-row">
+            <div>
+              <select value={gradeCompany} onChange={e => { setGradeCompany(e.target.value); if (e.target.value === 'RAW카드' || e.target.value === '') setGradeScore(''); }}>
+                <option value="">등급사 선택</option>
+                {GRADE_COMPANIES.map(c => <option key={c} value={c}>{c}</option>)}
+                <option value="RAW카드">RAW카드</option>
+              </select>
+            </div>
+            {gradeCompany && gradeCompany !== 'RAW카드' && (
+              <div>
+                <select value={gradeScore} onChange={e => setGradeScore(e.target.value)}>
+                  <option value="">점수 선택</option>
+                  {GRADE_SCORES.map(s => <option key={s} value={s}>{s}점</option>)}
+                </select>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Date & Price */}
