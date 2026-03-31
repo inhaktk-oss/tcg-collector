@@ -98,6 +98,15 @@ async function readGist(token, gistId) {
 async function writeGist(token, gistId, data) {
   return gistAPI('/' + gistId, token, { method: 'PATCH', body: JSON.stringify({ files: { [GIST_FILENAME]: { content: JSON.stringify(data) } } }) });
 }
+async function getGistHistory(token, gistId) {
+  const g = await gistAPI('/' + gistId, token);
+  return (g.history || []).slice(0, 10);
+}
+async function readGistVersion(token, gistId, sha) {
+  const g = await gistAPI('/' + gistId + '/' + sha, token);
+  const raw = g.files[GIST_FILENAME]?.content;
+  return raw ? JSON.parse(raw) : null;
+}
 function mergeCards(local, remote) { return local; } // unused, kept for compat
 
 // Compress photo for sync (max 400px, JPEG 55%)
@@ -360,7 +369,7 @@ function App() {
   // ─── Screens ───
   if (screen === 'add') return <CardForm onSave={addCard} onCancel={() => setScreen('list')} />;
   if (screen === 'edit' && editCard) return <CardForm card={editCard} onSave={updateCard} onCancel={() => { setScreen('detail'); setEditCard(null); }} />;
-  if (screen === 'sync') return <SyncScreen onBack={() => setScreen('list')} onSync={doSync} onPush={pushToGist} onPull={() => pullFromGist(false)} cardCount={cards.length} />;
+  if (screen === 'sync') return <SyncScreen onBack={() => setScreen('list')} onSync={doSync} onPush={pushToGist} onPull={() => pullFromGist(false)} onRestore={(cards) => setCards(cards)} cardCount={cards.length} />;
   if (screen === 'detail' && selectedCard) {
     const cat = CATEGORIES.find(x => x.value === selectedCard.category);
     return (
@@ -924,7 +933,7 @@ function CardForm({ card, onSave, onCancel }) {
   );
 }
 
-function SyncScreen({ onBack, onSync, onPush, onPull, cardCount }) {
+function SyncScreen({ onBack, onSync, onPush, onPull, onRestore, cardCount }) {
   const [cfg, setCfg] = useState(getSyncConfig() || { token: '', gistId: '' });
   const [status, setStatus] = useState('');
 
@@ -987,7 +996,7 @@ function SyncScreen({ onBack, onSync, onPush, onPull, cardCount }) {
           <button className="btn btn-primary" style={{ width: '100%', padding: 14, fontSize: 16, marginBottom: 8 }} onClick={async () => { setStatus('동기화 중...'); await onSync(); setStatus('✅ 동기화 완료!'); }}>
             🔄 지금 동기화
           </button>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
             <button className="btn btn-outline" style={{ flex: 1, padding: 10, fontSize: 13 }} onClick={async () => { setStatus('⬆️ 업로드 중...'); await onPush(); setStatus('✅ 이 기기 → 클라우드 완료!'); }}>
               ⬆️ 이 기기→클라우드
             </button>
@@ -995,6 +1004,38 @@ function SyncScreen({ onBack, onSync, onPush, onPull, cardCount }) {
               ⬇️ 클라우드→이 기기
             </button>
           </div>
+          <button className="btn btn-outline" style={{ width: '100%', padding: 10, fontSize: 13, color: '#f59e0b' }} onClick={async () => {
+            setStatus('📜 히스토리 로딩...');
+            try {
+              const h = await getGistHistory(cfg.token, cfg.gistId);
+              const items = [];
+              for (const rev of h) {
+                try {
+                  const data = await readGistVersion(cfg.token, cfg.gistId, rev.version);
+                  const count = data?.cards?.length || 0;
+                  const pokemonCount = (data?.cards || []).filter(c => c.category === 'pokemon').length;
+                  items.push({ sha: rev.version, date: rev.committed_at, count, pokemonCount, data });
+                } catch(e) { /* skip */ }
+              }
+              if (items.length === 0) { setStatus('히스토리가 없습니다.'); return; }
+              const msg = items.map((it, i) => `${i+1}. ${new Date(it.date).toLocaleString('ko-KR')} — 총 ${it.count}장 (포켓몬 ${it.pokemonCount}장)`).join('\n');
+              const pick = prompt('복구할 버전 번호를 입력하세요:\n\n' + msg);
+              if (pick && items[parseInt(pick) - 1]) {
+                const chosen = items[parseInt(pick) - 1];
+                const remoteCards = chosen.data.cards || [];
+                const finalCards = remoteCards.map(c => {
+                  const { syncPhoto, ...d } = c;
+                  return { ...d, photo: syncPhoto || d.photo || '' };
+                }).sort((a, b) => b.createdAt - a.createdAt);
+                onRestore(finalCards);
+                setStatus(`✅ ${new Date(chosen.date).toLocaleString('ko-KR')} 버전 복구 완료! (${chosen.count}장)`);
+              } else {
+                setStatus('복구 취소됨');
+              }
+            } catch(e) { setStatus('❌ 히스토리 로딩 실패: ' + e.message); }
+          }}>
+            📜 클라우드 히스토리에서 복구
+          </button>
         </div>
       )}
 
