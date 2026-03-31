@@ -241,10 +241,8 @@ function App() {
     } finally { syncingRef.current = false; }
   }
 
-  // On app load: pull from Gist
-  useEffect(() => { pullFromGist(false); }, []);
-
-  // After local card changes: push to Gist (2s debounce)
+  // Auto-pull DISABLED: only manual sync to prevent overwriting local data
+  // Auto-push after local card changes (2s debounce) — safe, user's action triggers it
   const prevCardsJSON = useRef('');
   useEffect(() => {
     const json = JSON.stringify(cards.map(({ photo, syncPhoto, ...r }) => r));
@@ -254,23 +252,6 @@ function App() {
     }
     prevCardsJSON.current = json;
   }, [cards]);
-
-  // Periodic pull every 30s (only if no recent local push)
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (Date.now() - lastPushRef.current > 10000) pullFromGist(true);
-    }, 30000);
-    return () => clearInterval(interval);
-  }, []);
-
-  // Pull when tab becomes visible
-  useEffect(() => {
-    function onVisible() {
-      if (document.visibilityState === 'visible' && Date.now() - lastPushRef.current > 5000) pullFromGist(true);
-    }
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
-  }, []);
 
   // Manual sync: pull first, then push if local has newer changes
   async function doSync() {
