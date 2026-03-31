@@ -272,7 +272,7 @@ function App() {
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, []);
 
-  // Manual sync
+  // Manual sync: pull first, then push if local has newer changes
   async function doSync() {
     const cfg = getSyncConfig();
     if (!cfg?.token) { setScreen('sync'); return; }
@@ -282,12 +282,15 @@ function App() {
         const existing = await findGist(cfg.token);
         let gistId = existing ? existing.id : null;
         if (!gistId) {
-        const created = await createGist(cfg.token, { cards: [], lastSync: Date.now() });
+          const created = await createGist(cfg.token, { cards: [], lastSync: Date.now() });
           gistId = created.id;
         }
         saveSyncConfig({ ...cfg, gistId });
       } catch(e) { setSyncStatus('error'); setTimeout(() => setSyncStatus(''), 3000); return; }
     }
+    // Pull first to get remote state
+    await pullFromGist(false);
+    // Then push local (with merged photos) to Gist
     await pushToGist();
   }
 
@@ -386,7 +389,7 @@ function App() {
   // ─── Screens ───
   if (screen === 'add') return <CardForm onSave={addCard} onCancel={() => setScreen('list')} />;
   if (screen === 'edit' && editCard) return <CardForm card={editCard} onSave={updateCard} onCancel={() => { setScreen('detail'); setEditCard(null); }} />;
-  if (screen === 'sync') return <SyncScreen onBack={() => setScreen('list')} onSync={doSync} />;
+  if (screen === 'sync') return <SyncScreen onBack={() => setScreen('list')} onSync={doSync} onPush={pushToGist} onPull={() => pullFromGist(false)} cardCount={cards.length} />;
   if (screen === 'detail' && selectedCard) {
     const cat = CATEGORIES.find(x => x.value === selectedCard.category);
     return (
@@ -950,7 +953,7 @@ function CardForm({ card, onSave, onCancel }) {
   );
 }
 
-function SyncScreen({ onBack, onSync }) {
+function SyncScreen({ onBack, onSync, onPush, onPull, cardCount }) {
   const [cfg, setCfg] = useState(getSyncConfig() || { token: '', gistId: '' });
   const [status, setStatus] = useState('');
 
@@ -1009,9 +1012,18 @@ function SyncScreen({ onBack, onSync }) {
       {cfg.gistId && (
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontSize: 13, color: '#34d399', marginBottom: 8 }}>✅ Gist 연결됨 (ID: {cfg.gistId.slice(0, 8)}...)</div>
-          <button className="btn btn-primary" style={{ width: '100%', padding: 14, fontSize: 16 }} onClick={async () => { setStatus('동기화 중...'); await onSync(); setStatus('✅ 동기화 완료!'); }}>
+          <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 8 }}>📱 이 기기 카드: {cardCount}장</div>
+          <button className="btn btn-primary" style={{ width: '100%', padding: 14, fontSize: 16, marginBottom: 8 }} onClick={async () => { setStatus('동기화 중...'); await onSync(); setStatus('✅ 동기화 완료!'); }}>
             🔄 지금 동기화
           </button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn btn-outline" style={{ flex: 1, padding: 10, fontSize: 13 }} onClick={async () => { setStatus('⬆️ 업로드 중...'); await onPush(); setStatus('✅ 이 기기 → 클라우드 완료!'); }}>
+              ⬆️ 이 기기→클라우드
+            </button>
+            <button className="btn btn-outline" style={{ flex: 1, padding: 10, fontSize: 13 }} onClick={async () => { setStatus('⬇️ 다운로드 중...'); await onPull(); setStatus('✅ 클라우드→이 기기 완료!'); }}>
+              ⬇️ 클라우드→이 기기
+            </button>
+          </div>
         </div>
       )}
 
