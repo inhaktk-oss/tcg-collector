@@ -103,6 +103,36 @@ function mergeCards(local, remote) {
 }
 function stripPhotos(cards) { return cards.map(({ photo, ...rest }) => rest); }
 
+// Compress photo for sync (max 400px, JPEG 60%)
+function compressPhoto(dataUrl) {
+  return new Promise((resolve) => {
+    if (!dataUrl) { resolve(''); return; }
+    const img = new Image();
+    img.onload = () => {
+      const MAX = 400;
+      let w = img.width, h = img.height;
+      if (w > MAX || h > MAX) {
+        if (w > h) { h = Math.round(h * MAX / w); w = MAX; }
+        else { w = Math.round(w * MAX / h); h = MAX; }
+      }
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      resolve(c.toDataURL('image/jpeg', 0.6));
+    };
+    img.onerror = () => resolve('');
+    img.src = dataUrl;
+  });
+}
+async function prepareForSync(cards) {
+  const result = [];
+  for (const card of cards) {
+    const syncPhoto = card.photo ? await compressPhoto(card.photo) : '';
+    result.push({ ...card, photo: undefined, syncPhoto });
+  }
+  return result;
+}
+
 const CATEGORIES = [
   { value: 'pokemon', label: '포켓몬', emoji: '⚡', badge: 'badge-pokemon' },
   { value: 'sports', label: '스포츠', emoji: '⚾', badge: 'badge-sports' },
@@ -171,18 +201,35 @@ function App() {
     try {
       if (!silent) setSyncStatus('syncing');
       const remote = await readGist(cfg.token, cfg.gistId);
-      const localStripped = stripPhotos(loadCards());
-      const merged = mergeCards(localStripped, remote?.cards || []);
-      // Only write if there are actual changes
+      const localCards = loadCards();
+      const localForMerge = localCards.map(({ photo, ...rest }) => rest);
+      const remoteForMerge = (remote?.cards || []).map(({ syncPhoto, ...rest }) => rest);
+      const merged = mergeCards(localForMerge, remoteForMerge);
+
+      // Build sync payload with compressed photos
+      const localPrepped = await prepareForSync(localCards);
+      const localSyncMap = new Map(localPrepped.map(c => [c.id, c.syncPhoto]));
+      const remoteSyncMap = new Map((remote?.cards || []).map(c => [c.id, c.syncPhoto || '']));
+      const syncCards = merged.map(c => ({
+        ...c, 
+        syncPhoto: localSyncMap.get(c.id) || remoteSyncMap.get(c.id) || ''
+      }));
+
+      // Only write if changed
       const remoteJSON = JSON.stringify(remote?.cards || []);
-      const mergedJSON = JSON.stringify(merged);
-      if (mergedJSON !== remoteJSON) {
-        await writeGist(cfg.token, cfg.gistId, { cards: merged, lastSync: Date.now() });
+      const syncJSON = JSON.stringify(syncCards);
+      if (syncJSON !== remoteJSON) {
+        await writeGist(cfg.token, cfg.gistId, { cards: syncCards, lastSync: Date.now() });
       }
-      const localMap = new Map(loadCards().map(c => [c.id, c]));
+
+      // Merge back: keep local photo if exists, otherwise use syncPhoto from remote
+      const localMap = new Map(localCards.map(c => [c.id, c]));
       const finalCards = merged.map(c => {
         const loc = localMap.get(c.id);
-        return loc ? { ...c, photo: loc.photo } : c;
+        if (loc?.photo) return { ...c, photo: loc.photo };
+        // Use remote syncPhoto as local photo (compressed but better than nothing)
+        const rSync = remoteSyncMap.get(c.id);
+        return { ...c, photo: rSync || '' };
       });
       setCards(finalCards);
       if (!silent) { setSyncStatus('done'); setTimeout(() => setSyncStatus(''), 2000); }
@@ -197,7 +244,7 @@ function App() {
   // Auto-sync after ANY card change (3s debounce)
   const prevCardsJSON = useRef('');
   useEffect(() => {
-    const json = JSON.stringify(stripPhotos(cards));
+    const json = JSON.stringify(cards.map(({ photo, ...r }) => r));
     if (prevCardsJSON.current && json !== prevCardsJSON.current) {
       if (syncTimer.current) clearTimeout(syncTimer.current);
       syncTimer.current = setTimeout(() => fullSync(true), 2000);
@@ -228,7 +275,8 @@ function App() {
         const existing = await findGist(cfg.token);
         let gistId = existing ? existing.id : null;
         if (!gistId) {
-          const created = await createGist(cfg.token, { cards: stripPhotos(cards), lastSync: Date.now() });
+        const prepped = await prepareForSync(cards);
+          const created = await createGist(cfg.token, { cards: prepped, lastSync: Date.now() });
           gistId = created.id;
         }
         saveSyncConfig({ ...cfg, gistId });
@@ -915,7 +963,7 @@ function SyncScreen({ onBack, onSync }) {
       <div style={{ background: '#1e293b', borderRadius: 12, padding: 16, marginBottom: 16, border: '1px solid #334155' }}>
         <p style={{ fontSize: 13, color: '#94a3b8', marginBottom: 12, lineHeight: 1.6 }}>
           GitHub Gist를 통해 여러 기기에서 카드 데이터를 동기화합니다.<br/>
-          <span style={{ color: '#f59e0b' }}>※ 사진은 용량 문제로 동기화되지 않습니다 (기기별 로컬 저장)</span>
+          <span style={{ color: '#34d399' }}>※ 사진도 축소 버전으로 동기화됩니다 (원본은 기기별 로컬 저장)</span>
         </p>
         
         <label style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, display: 'block' }}>GitHub Personal Access Token (gist 권한)</label>
