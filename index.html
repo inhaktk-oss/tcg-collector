@@ -162,6 +162,30 @@ function App() {
 
   useEffect(() => { saveCards(cards); }, [cards]);
 
+  // Auto-pull from Gist on app load
+  useEffect(() => {
+    (async () => {
+      const cfg = getSyncConfig();
+      if (!cfg?.token || !cfg?.gistId) return;
+      try {
+        setSyncStatus('syncing');
+        const remote = await readGist(cfg.token, cfg.gistId);
+        if (remote?.cards?.length) {
+          const localStripped = stripPhotos(loadCards());
+          const merged = mergeCards(localStripped, remote.cards);
+          const localMap = new Map(loadCards().map(c => [c.id, c]));
+          const finalCards = merged.map(c => {
+            const loc = localMap.get(c.id);
+            return loc ? { ...c, photo: loc.photo } : c;
+          });
+          setCards(finalCards);
+        }
+        setSyncStatus('done');
+        setTimeout(() => setSyncStatus(''), 2000);
+      } catch { setSyncStatus(''); }
+    })();
+  }, []);
+
   // Auto-sync after card changes (3s debounce)
   const autoSync = useCallback(() => {
     const cfg = getSyncConfig();
