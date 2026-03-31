@@ -494,6 +494,104 @@ function App() {
   );
 }
 
+// ─── Photo Cropper (card ratio 63:88) ───
+function PhotoCropper({ src, onCrop, onCancel }) {
+  const RATIO = 63 / 88; // width / height
+  const containerRef = useRef(null);
+  const imgRef = useRef(null);
+  const [imgLoaded, setImgLoaded] = useState(false);
+  const [scale, setScale] = useState(1);
+  const [pos, setPos] = useState({ x: 0, y: 0 });
+  const dragRef = useRef({ dragging: false, startX: 0, startY: 0, origX: 0, origY: 0 });
+  const [cropBox, setCropBox] = useState({ x: 0, y: 0, w: 0, h: 0 });
+
+  useEffect(() => {
+    if (!imgLoaded || !containerRef.current) return;
+    const cw = containerRef.current.clientWidth;
+    const ch = containerRef.current.clientHeight;
+    const boxH = Math.min(ch * 0.85, (cw * 0.7) / RATIO);
+    const boxW = boxH * RATIO;
+    setCropBox({ x: (cw - boxW) / 2, y: (ch - boxH) / 2, w: boxW, h: boxH });
+
+    const img = imgRef.current;
+    const iw = img.naturalWidth, ih = img.naturalHeight;
+    const fitScale = Math.max(boxW / iw, boxH / ih) * 1.05;
+    setScale(fitScale);
+    setPos({ x: (cw - iw * fitScale) / 2, y: (ch - ih * fitScale) / 2 });
+  }, [imgLoaded]);
+
+  function handleWheel(e) {
+    e.preventDefault();
+    setScale(s => Math.max(0.1, Math.min(5, s - e.deltaY * 0.001)));
+  }
+
+  function startDrag(cx, cy) {
+    dragRef.current = { dragging: true, startX: cx, startY: cy, origX: pos.x, origY: pos.y };
+  }
+  function moveDrag(cx, cy) {
+    if (!dragRef.current.dragging) return;
+    const d = dragRef.current;
+    setPos({ x: d.origX + (cx - d.startX), y: d.origY + (cy - d.startY) });
+  }
+  function endDrag() { dragRef.current.dragging = false; }
+
+  function handleMouseDown(e) { e.preventDefault(); startDrag(e.clientX, e.clientY); }
+  function handleMouseMove(e) { moveDrag(e.clientX, e.clientY); }
+  function handleMouseUp() { endDrag(); }
+  function handleTouchStart(e) { if (e.touches.length === 1) startDrag(e.touches[0].clientX, e.touches[0].clientY); }
+  function handleTouchMove(e) { if (e.touches.length === 1) { e.preventDefault(); moveDrag(e.touches[0].clientX, e.touches[0].clientY); } }
+  function handleTouchEnd() { endDrag(); }
+
+  function doCrop() {
+    const img = imgRef.current;
+    if (!img) return;
+    const iw = img.naturalWidth, ih = img.naturalHeight;
+    const sx = (cropBox.x - pos.x) / scale;
+    const sy = (cropBox.y - pos.y) / scale;
+    const sw = cropBox.w / scale;
+    const sh = cropBox.h / scale;
+
+    const outW = Math.min(800, Math.round(sw));
+    const outH = Math.round(outW / RATIO);
+    const canvas = document.createElement('canvas');
+    canvas.width = outW; canvas.height = outH;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, outW, outH);
+    onCrop(canvas.toDataURL('image/jpeg', 0.85));
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 9999, background: 'rgba(0,0,0,0.95)', display: 'flex', flexDirection: 'column' }}>
+      <div style={{ padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <button onClick={onCancel} style={{ background: 'none', border: 'none', color: '#94a3b8', fontSize: 15, cursor: 'pointer' }}>✕ 취소</button>
+        <span style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600 }}>사진 자르기</span>
+        <button onClick={doCrop} style={{ background: '#6366f1', border: 'none', color: 'white', padding: '8px 16px', borderRadius: 8, fontSize: 14, cursor: 'pointer', fontWeight: 600 }}>✂️ 자르기</button>
+      </div>
+      <div style={{ padding: '0 16px 8px', textAlign: 'center' }}>
+        <input type="range" min="10" max="300" value={Math.round(scale * 100)} onChange={e => setScale(e.target.value / 100)}
+          style={{ width: '60%', maxWidth: 250, accentColor: '#6366f1' }} />
+        <span style={{ color: '#64748b', fontSize: 12, marginLeft: 8 }}>{Math.round(scale * 100)}%</span>
+      </div>
+      <div ref={containerRef} style={{ flex: 1, position: 'relative', overflow: 'hidden', touchAction: 'none', cursor: 'grab' }}
+        onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}
+        onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd}
+        onWheel={handleWheel}>
+        <img ref={imgRef} src={src} onLoad={() => setImgLoaded(true)}
+          style={{ position: 'absolute', left: pos.x, top: pos.y, width: imgRef.current ? imgRef.current.naturalWidth * scale : 'auto', height: imgRef.current ? imgRef.current.naturalHeight * scale : 'auto', pointerEvents: 'none', userSelect: 'none' }} draggable={false} />
+        {imgLoaded && <>
+          <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.6)', clipPath: `polygon(0 0, 100% 0, 100% 100%, 0 100%, 0 0, ${cropBox.x}px ${cropBox.y}px, ${cropBox.x}px ${cropBox.y + cropBox.h}px, ${cropBox.x + cropBox.w}px ${cropBox.y + cropBox.h}px, ${cropBox.x + cropBox.w}px ${cropBox.y}px, ${cropBox.x}px ${cropBox.y}px)`, pointerEvents: 'none' }} />
+          <div style={{ position: 'absolute', left: cropBox.x, top: cropBox.y, width: cropBox.w, height: cropBox.h, border: '2px solid rgba(255,255,255,0.8)', borderRadius: 8, pointerEvents: 'none', boxShadow: '0 0 0 1px rgba(0,0,0,0.3)' }}>
+            <div style={{ position: 'absolute', top: '33.3%', left: 0, right: 0, borderTop: '1px solid rgba(255,255,255,0.2)' }} />
+            <div style={{ position: 'absolute', top: '66.6%', left: 0, right: 0, borderTop: '1px solid rgba(255,255,255,0.2)' }} />
+            <div style={{ position: 'absolute', left: '33.3%', top: 0, bottom: 0, borderLeft: '1px solid rgba(255,255,255,0.2)' }} />
+            <div style={{ position: 'absolute', left: '66.6%', top: 0, bottom: 0, borderLeft: '1px solid rgba(255,255,255,0.2)' }} />
+          </div>
+        </>}
+      </div>
+    </div>
+  );
+}
+
 function CardForm({ card, onSave, onCancel }) {
   const [name, setName] = useState(card?.name || '');
   const [category, setCategory] = useState(card?.category || 'pokemon');
@@ -505,6 +603,7 @@ function CardForm({ card, onSave, onCancel }) {
   const [seller, setSeller] = useState(card?.seller || '');
   const [memo, setMemo] = useState(card?.memo || '');
   const [photo, setPhoto] = useState(card?.photo || '');
+  const [cropSrc, setCropSrc] = useState(null);
   const fileRef = useRef(null);
 
   function handlePhoto(e) {
@@ -512,8 +611,9 @@ function CardForm({ card, onSave, onCancel }) {
     if (!file) return;
     if (file.size > 5 * 1024 * 1024) { alert('5MB 이하의 이미지만 가능합니다.'); return; }
     const reader = new FileReader();
-    reader.onload = (ev) => setPhoto(ev.target.result);
+    reader.onload = (ev) => setCropSrc(ev.target.result);
     reader.readAsDataURL(file);
+    e.target.value = '';
   }
 
   function handleSubmit(e) {
@@ -547,12 +647,16 @@ function CardForm({ card, onSave, onCancel }) {
       </div>
 
       <form onSubmit={handleSubmit}>
+        {/* Photo Cropper Modal */}
+        {cropSrc && <PhotoCropper src={cropSrc} onCrop={(result) => { setPhoto(result); setCropSrc(null); }} onCancel={() => setCropSrc(null)} />}
+
         {/* Photo */}
         <div style={{ marginBottom: 16, textAlign: 'center' }}>
           {photo ? (
             <div style={{ position: 'relative', display: 'inline-block' }}>
               <img src={photo} alt="preview" style={{ maxHeight: 200, borderRadius: 12 }} />
               <button type="button" onClick={() => setPhoto('')} style={{ position: 'absolute', top: 4, right: 4, background: 'rgba(0,0,0,0.6)', color: 'white', border: 'none', borderRadius: '50%', width: 28, height: 28, cursor: 'pointer', fontSize: 14 }}>✕</button>
+              <button type="button" onClick={() => fileRef.current?.click()} style={{ position: 'absolute', bottom: 4, right: 4, background: 'rgba(0,0,0,0.6)', color: 'white', border: 'none', borderRadius: 6, padding: '4px 8px', cursor: 'pointer', fontSize: 11 }}>✂️ 다시</button>
             </div>
           ) : (
             <div onClick={() => fileRef.current?.click()} style={{ background: '#1e293b', border: '2px dashed #334155', borderRadius: 12, padding: '30px 20px', cursor: 'pointer' }}>
