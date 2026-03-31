@@ -90,17 +90,7 @@ async function readGist(token, gistId) {
 async function writeGist(token, gistId, data) {
   return gistAPI('/' + gistId, token, { method: 'PATCH', body: JSON.stringify({ files: { [GIST_FILENAME]: { content: JSON.stringify(data) } } }) });
 }
-function mergeCards(local, remote) {
-  const map = new Map();
-  // Remote first, then local overwrites if newer
-  for (const card of [...remote, ...local]) {
-    const existing = map.get(card.id);
-    if (!existing || (card.updatedAt || card.createdAt || 0) > (existing.updatedAt || existing.createdAt || 0)) {
-      map.set(card.id, card);
-    }
-  }
-  return [...map.values()];
-}
+function mergeCards(local, remote) { return local; } // unused, kept for compat
 
 // Compress photo for sync (max 400px, JPEG 55%)
 function compressPhoto(dataUrl) {
@@ -183,84 +173,93 @@ function App() {
 
   useEffect(() => { saveCards(cards); }, [cards]);
 
-  // ─── Full bidirectional sync ───
+  // ═══ Simple Sync: Gist is source of truth ═══
   const syncingRef = useRef(false);
-  async function fullSync(silent) {
+  const lastPushRef = useRef(0);
+
+  // PUSH: upload local cards to Gist (called after any local change)
+  async function pushToGist() {
+    const cfg = getSyncConfig();
+    if (!cfg?.token || !cfg?.gistId || syncingRef.current) return;
+    syncingRef.current = true;
+    try {
+      setSyncStatus('syncing');
+      const localCards = loadCards();
+      // Build sync payload: card data + compressed photos
+      const syncCards = [];
+      for (const c of localCards) {
+        const { photo, syncPhoto, ...data } = c;
+        const compressed = (photo && photo.startsWith('data:')) ? await compressPhoto(photo) : (syncPhoto || '');
+        syncCards.push({ ...data, syncPhoto: compressed });
+      }
+      await writeGist(cfg.token, cfg.gistId, { cards: syncCards, lastSync: Date.now() });
+      lastPushRef.current = Date.now();
+      setSyncStatus('done');
+      setTimeout(() => setSyncStatus(''), 1500);
+    } catch(e) {
+      console.error('Push error:', e);
+      setSyncStatus('error');
+      setTimeout(() => setSyncStatus(''), 3000);
+    } finally { syncingRef.current = false; }
+  }
+
+  // PULL: download cards from Gist and replace local
+  async function pullFromGist(silent) {
     const cfg = getSyncConfig();
     if (!cfg?.token || !cfg?.gistId || syncingRef.current) return;
     syncingRef.current = true;
     try {
       if (!silent) setSyncStatus('syncing');
       const remote = await readGist(cfg.token, cfg.gistId);
-      const localCards = loadCards();
       const remoteCards = remote?.cards || [];
-      // Include local tombstones (soft-deleted) in merge
-      const tombstones = JSON.parse(localStorage.getItem('tcg_deleted') || '[]');
-      const allLocal = [...localCards, ...tombstones];
-
-      // Merge: both sides carry syncPhoto, local carries photo
-      const merged = mergeCards(allLocal, remoteCards);
-
-      // Separate active from deleted
-      const active = merged.filter(c => !c._deleted);
-      const deleted = merged.filter(c => c._deleted);
-
-      // Build sync payload: compress local photos, keep remote syncPhoto
-      const remotePhotoMap = new Map(remoteCards.map(c => [c.id, c.syncPhoto || '']));
-      const syncCards = [];
-      for (const c of merged) {
-        const { photo, ...rest } = c;
-        if (photo && photo.startsWith('data:')) {
-          rest.syncPhoto = await compressPhoto(photo);
-        } else if (!rest.syncPhoto) {
-          rest.syncPhoto = remotePhotoMap.get(c.id) || '';
-        }
-        syncCards.push(rest);
+      if (remoteCards.length === 0 && loadCards().length > 0) {
+        // Remote is empty but we have local data - push instead
+        syncingRef.current = false;
+        await pushToGist();
+        return;
       }
-
-      // Write to Gist
-      await writeGist(cfg.token, cfg.gistId, { cards: syncCards, lastSync: Date.now() });
-
-      // Build local cards: active only, keep local photo or use syncPhoto
-      const finalCards = active.map(c => {
-        const localPhoto = localCards.find(l => l.id === c.id)?.photo;
-        const remoteSync = syncCards.find(s => s.id === c.id)?.syncPhoto;
-        return { ...c, photo: localPhoto || remoteSync || '', syncPhoto: undefined };
+      // Build local cards from remote: use syncPhoto as photo
+      const localCards = loadCards();
+      const localPhotoMap = new Map(localCards.filter(c => c.photo).map(c => [c.id, c.photo]));
+      const finalCards = remoteCards.map(c => {
+        const { syncPhoto, ...data } = c;
+        return { ...data, photo: localPhotoMap.get(c.id) || syncPhoto || '' };
       }).sort((a, b) => b.createdAt - a.createdAt);
-
       setCards(finalCards);
-      // Clear tombstones after successful sync
-      localStorage.removeItem('tcg_deleted');
-      if (!silent) { setSyncStatus('done'); setTimeout(() => setSyncStatus(''), 2000); }
+      if (!silent) { setSyncStatus('done'); setTimeout(() => setSyncStatus(''), 1500); }
     } catch(e) {
-      console.error('Sync error:', e);
+      console.error('Pull error:', e);
       if (!silent) { setSyncStatus('error'); setTimeout(() => setSyncStatus(''), 3000); }
     } finally { syncingRef.current = false; }
   }
 
-  // Auto-sync on app load
-  useEffect(() => { fullSync(false); }, []);
+  // On app load: pull from Gist
+  useEffect(() => { pullFromGist(false); }, []);
 
-  // Auto-sync after ANY card change (3s debounce)
+  // After local card changes: push to Gist (2s debounce)
   const prevCardsJSON = useRef('');
   useEffect(() => {
-    const json = JSON.stringify(cards.map(({ photo, ...r }) => r));
+    const json = JSON.stringify(cards.map(({ photo, syncPhoto, ...r }) => r));
     if (prevCardsJSON.current && json !== prevCardsJSON.current) {
       if (syncTimer.current) clearTimeout(syncTimer.current);
-      syncTimer.current = setTimeout(() => fullSync(true), 2000);
+      syncTimer.current = setTimeout(() => pushToGist(), 2000);
     }
     prevCardsJSON.current = json;
   }, [cards]);
 
-  // Periodic polling every 30s for remote changes
+  // Periodic pull every 30s (only if no recent local push)
   useEffect(() => {
-    const interval = setInterval(() => fullSync(true), 30000);
+    const interval = setInterval(() => {
+      if (Date.now() - lastPushRef.current > 10000) pullFromGist(true);
+    }, 30000);
     return () => clearInterval(interval);
   }, []);
 
-  // Sync when tab becomes visible (switching back from other app/tab)
+  // Pull when tab becomes visible
   useEffect(() => {
-    function onVisible() { if (document.visibilityState === 'visible') fullSync(true); }
+    function onVisible() {
+      if (document.visibilityState === 'visible' && Date.now() - lastPushRef.current > 5000) pullFromGist(true);
+    }
     document.addEventListener('visibilitychange', onVisible);
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, []);
@@ -281,23 +280,7 @@ function App() {
         saveSyncConfig({ ...cfg, gistId });
       } catch(e) { setSyncStatus('error'); setTimeout(() => setSyncStatus(''), 3000); return; }
     }
-    await fullSync(false);
-  }
-
-  const filtered = useMemo(() => {
-    let list = [...cards];
-    if (filter !== 'all') list = list.filter(c => c.category === filter);
-    if (search.trim()) {
-      const q = search.trim().toLowerCase();
-      list = list.filter(c => c.name.toLowerCase().includes(q) || (c.memo || '').toLowerCase().includes(q) || (c.seller || '').toLowerCase().includes(q));
-    }
-    switch (sort) {
-      case 'oldest': list.sort((a, b) => a.createdAt - b.createdAt); break;
-      case 'price-high': list.sort((a, b) => (b.price || 0) - (a.price || 0)); break;
-      case 'price-low': list.sort((a, b) => (a.price || 0) - (b.price || 0)); break;
-      case 'name': list.sort((a, b) => a.name.localeCompare(b.name, 'ko')); break;
-      default: list.sort((a, b) => b.createdAt - a.createdAt);
-    }
+    await pushToGist();
     return list;
   }, [cards, filter, search, sort]);
 
@@ -320,13 +303,6 @@ function App() {
     setEditCard(null);
   }
   function deleteCard(id) {
-    // Save soft-delete marker to a separate key for sync to pick up
-    const tombstones = JSON.parse(localStorage.getItem('tcg_deleted') || '[]');
-    const card = cards.find(c => c.id === id);
-    if (card) {
-      tombstones.push({ ...card, photo: undefined, syncPhoto: undefined, _deleted: true, updatedAt: Date.now() });
-      localStorage.setItem('tcg_deleted', JSON.stringify(tombstones));
-    }
     setCards(prev => prev.filter(c => c.id !== id));
     setSelectedCard(null);
     setShowDeleteConfirm(false);
