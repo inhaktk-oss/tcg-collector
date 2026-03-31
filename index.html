@@ -16,9 +16,15 @@
 <style>
   * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; min-height: 100vh; }
-  input, select, textarea { color: #e2e8f0; background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 10px 12px; width: 100%; font-size: 15px; }
+  input, select, textarea { color: #e2e8f0; background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 10px 12px; width: 100%; font-size: 16px; -webkit-appearance: none; appearance: none; }
   input:focus, select:focus, textarea:focus { outline: none; border-color: #6366f1; box-shadow: 0 0 0 2px rgba(99,102,241,0.3); }
   input[type="file"] { padding: 8px; font-size: 13px; }
+  input[type="date"] { min-height: 44px; }
+  select { min-height: 44px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M6 8L1 3h10z'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; padding-right: 32px; }
+  .form-field { margin-bottom: 16px; }
+  .form-field label { font-size: 13px; color: #94a3b8; margin-bottom: 6px; display: block; }
+  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 400px) { .form-row { grid-template-columns: 1fr; } }
   .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
   .card-item { background: #1e293b; border-radius: 12px; overflow: hidden; border: 1px solid #334155; transition: transform 0.15s, box-shadow 0.15s; cursor: pointer; }
   .card-item:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
@@ -103,7 +109,21 @@ const CATEGORIES = [
   { value: 'other', label: '기타', emoji: '🎴', badge: 'badge-other' },
 ];
 
-const GRADES = ['', 'PSA 10', 'PSA 9', 'PSA 8', 'BGS 10', 'BGS 9.5', 'BGS 9', 'BGS 8.5', 'BGS 8', 'CGC 10', 'CGC 9.5', 'CGC 9', 'CGC 8.5', 'CGC 8', 'BRG 10', 'BRG 9.5', 'BRG 9', 'BRG 8.5', 'BRG 8', 'Raw(미등급)', '기타'];
+const GRADES = [
+  '', 
+  'PSA 10', 'PSA 9', 'PSA 8', 'PSA 8미만',
+  'BGS 10', 'BGS 9.5', 'BGS 9', 'BGS 8.5', 'BGS 8', 'BGS 8미만',
+  'CGC 10', 'CGC 9.5', 'CGC 9', 'CGC 8.5', 'CGC 8', 'CGC 8미만',
+  'BRG 10', 'BRG 9.5', 'BRG 9', 'BRG 8.5', 'BRG 8', 'BRG 8미만',
+  'Raw(미등급)',
+];
+const GRADE_GROUPS = [
+  { label: 'PSA', grades: ['PSA 10', 'PSA 9', 'PSA 8', 'PSA 8미만'] },
+  { label: 'BGS', grades: ['BGS 10', 'BGS 9.5', 'BGS 9', 'BGS 8.5', 'BGS 8', 'BGS 8미만'] },
+  { label: 'CGC', grades: ['CGC 10', 'CGC 9.5', 'CGC 9', 'CGC 8.5', 'CGC 8', 'CGC 8미만'] },
+  { label: 'BRG', grades: ['BRG 10', 'BRG 9.5', 'BRG 9', 'BRG 8.5', 'BRG 8', 'BRG 8미만'] },
+  { label: '기타', grades: ['Raw(미등급)'] },
+];
 const SORT_OPTIONS = [
   { value: 'newest', label: '최근 등록순' },
   { value: 'oldest', label: '오래된순' },
@@ -542,18 +562,18 @@ function CardForm({ card, onSave, onCancel }) {
         </div>
 
         {/* Name */}
-        <div style={{ marginBottom: 12 }}>
-          <label style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, display: 'block' }}>카드 이름 *</label>
+        <div className="form-field">
+          <label>카드 이름 *</label>
           <input type="text" value={name} onChange={e => setName(e.target.value)} placeholder="예: 리자몽 VMAX HR" autoFocus />
         </div>
 
         {/* Category */}
-        <div style={{ marginBottom: 12 }}>
-          <label style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, display: 'block' }}>카테고리</label>
-          <div style={{ display: 'flex', gap: 8 }}>
+        <div className="form-field">
+          <label>카테고리</label>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
             {CATEGORIES.map(cat => (
               <button key={cat.value} type="button" onClick={() => setCategory(cat.value)}
-                style={{ flex: 1, padding: '10px 4px', borderRadius: 8, border: category === cat.value ? '2px solid #6366f1' : '1px solid #334155', background: category === cat.value ? 'rgba(99,102,241,0.15)' : '#1e293b', cursor: 'pointer', textAlign: 'center', fontSize: 13, color: '#e2e8f0' }}>
+                style={{ padding: '10px 4px', borderRadius: 8, border: category === cat.value ? '2px solid #6366f1' : '1px solid #334155', background: category === cat.value ? 'rgba(99,102,241,0.15)' : '#1e293b', cursor: 'pointer', textAlign: 'center', fontSize: 13, color: '#e2e8f0', minHeight: 44 }}>
                 {cat.emoji}<br/><span style={{ fontSize: 11 }}>{cat.label}</span>
               </button>
             ))}
@@ -561,35 +581,41 @@ function CardForm({ card, onSave, onCancel }) {
         </div>
 
         {/* Grade */}
-        <div style={{ marginBottom: 12 }}>
-          <label style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, display: 'block' }}>등급</label>
+        <div className="form-field">
+          <label>등급</label>
           <select value={grade} onChange={e => setGrade(e.target.value)}>
             <option value="">선택 안 함</option>
-            {GRADES.filter(g => g).map(g => <option key={g} value={g}>{g}</option>)}
+            {GRADE_GROUPS.map(group => (
+              <optgroup key={group.label} label={group.label}>
+                {group.grades.map(g => <option key={g} value={g}>{g}</option>)}
+              </optgroup>
+            ))}
           </select>
         </div>
 
         {/* Date & Price */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
-          <div>
-            <label style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, display: 'block' }}>구매일</label>
-            <input type="date" value={purchaseDate} onChange={e => setPurchaseDate(e.target.value)} />
-          </div>
-          <div>
-            <label style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, display: 'block' }}>구매가 (원)</label>
-            <input type="text" inputMode="numeric" value={price ? Number(price).toLocaleString('ko-KR') : ''} onChange={e => handlePriceInput(e.target.value)} placeholder="0" />
+        <div className="form-field">
+          <div className="form-row">
+            <div>
+              <label>구매일</label>
+              <input type="date" value={purchaseDate} onChange={e => setPurchaseDate(e.target.value)} />
+            </div>
+            <div>
+              <label>구매가 (원)</label>
+              <input type="text" inputMode="numeric" value={price ? Number(price).toLocaleString('ko-KR') : ''} onChange={e => handlePriceInput(e.target.value)} placeholder="0" />
+            </div>
           </div>
         </div>
 
         {/* Seller */}
-        <div style={{ marginBottom: 12 }}>
-          <label style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, display: 'block' }}>구매처</label>
+        <div className="form-field">
+          <label>구매처</label>
           <input type="text" value={seller} onChange={e => setSeller(e.target.value)} placeholder="예: 번개장터, 카드샵, 해외직구..." />
         </div>
 
         {/* Memo */}
-        <div style={{ marginBottom: 20 }}>
-          <label style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, display: 'block' }}>메모</label>
+        <div className="form-field" style={{ marginBottom: 24 }}>
+          <label>메모</label>
           <textarea value={memo} onChange={e => setMemo(e.target.value)} placeholder="특이사항, 컨디션 등..." rows={3} style={{ resize: 'vertical' }} />
         </div>
 
