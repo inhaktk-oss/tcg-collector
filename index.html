@@ -299,28 +299,110 @@ function App() {
   useEffect(() => { saveCards(cards); }, [cards]);
   useEffect(() => { setPageSize(20); }, [filter, statusFilter, search]);
 
-  // ═══ Simple Sync: Gist is source of truth ═══
+  // ═══ Robust Sync: merge both sides, save everywhere atomically ═══
   const syncingRef = useRef(false);
-  const lastPushRef = useRef(0);
 
-  // PUSH: upload local cards to Gist (called after any local change)
-  async function pushToGist() {
+  // Helper: compress all cards for Gist upload
+  async function buildSyncPayload(cardList) {
+    const syncCards = [];
+    for (const c of cardList) {
+      const { photo, syncPhoto, ...data } = c;
+      const compressed = (photo && photo.startsWith('data:')) ? await compressPhoto(photo) : (syncPhoto || '');
+      syncCards.push({ ...data, syncPhoto: compressed });
+    }
+    return syncCards;
+  }
+
+  // Helper: save merged cards to BOTH React state AND localStorage synchronously
+  function saveMergedCards(merged) {
+    saveCards(merged);      // localStorage — immediate
+    setCards(merged);       // React state — triggers re-render
+  }
+
+  // Ensure Gist connection exists, return config or null
+  async function ensureGistConnection() {
     const cfg = getSyncConfig();
-    if (!cfg?.token || !cfg?.gistId || syncingRef.current) return;
+    if (!cfg?.token) { setScreen('sync'); return null; }
+    if (cfg.gistId) return cfg;
+    try {
+      setSyncStatus('syncing');
+      const existing = await findGist(cfg.token);
+      let gistId = existing ? existing.id : null;
+      if (!gistId) {
+        const created = await createGist(cfg.token, { cards: [], lastSync: Date.now() });
+        gistId = created.id;
+      }
+      const newCfg = { ...cfg, gistId };
+      saveSyncConfig(newCfg);
+      return newCfg;
+    } catch(e) {
+      setSyncStatus('error'); setTimeout(() => setSyncStatus(''), 3000);
+      return null;
+    }
+  }
+
+  // FULL SYNC: read both → merge → save local + push remote (atomic)
+  async function doSync() {
+    if (syncingRef.current) return;
+    const cfg = await ensureGistConnection();
+    if (!cfg) return;
     syncingRef.current = true;
     backupCards();
     try {
       setSyncStatus('syncing');
+      // 1. Read both sides
       const localCards = loadCards();
-      // Build sync payload: card data + compressed photos
-      const syncCards = [];
-      for (const c of localCards) {
-        const { photo, syncPhoto, ...data } = c;
-        const compressed = (photo && photo.startsWith('data:')) ? await compressPhoto(photo) : (syncPhoto || '');
-        syncCards.push({ ...data, syncPhoto: compressed });
-      }
-      await writeGist(cfg.token, cfg.gistId, { cards: syncCards, lastSync: Date.now() });
-      lastPushRef.current = Date.now();
+      const remote = await readGist(cfg.token, cfg.gistId);
+      const remoteCards = remote?.cards || [];
+      // 2. Restore full-res photos from local, fallback to syncPhoto
+      const localPhotoMap = new Map(localCards.filter(c => c.photo).map(c => [c.id, c.photo]));
+      const remoteWithPhotos = remoteCards.map(c => {
+        const { syncPhoto, ...data } = c;
+        return { ...data, photo: localPhotoMap.get(c.id) || syncPhoto || '' };
+      });
+      // 3. Merge: keep all cards from both sides, prefer newer for conflicts
+      const merged = mergeCards(localCards, remoteWithPhotos);
+      // 4. Save to localStorage + React state FIRST (before push)
+      saveMergedCards(merged);
+      // 5. Push merged result to Gist
+      const syncPayload = await buildSyncPayload(merged);
+      await writeGist(cfg.token, cfg.gistId, { cards: syncPayload, lastSync: Date.now() });
+      setSyncStatus('done');
+      setTimeout(() => setSyncStatus(''), 1500);
+    } catch(e) {
+      console.error('Sync error:', e);
+      setSyncStatus('error');
+      setTimeout(() => setSyncStatus(''), 3000);
+    } finally { syncingRef.current = false; }
+  }
+
+  // PUSH: merge-then-push (never blindly overwrite remote)
+  async function pushToGist() {
+    if (syncingRef.current) return;
+    const cfg = getSyncConfig();
+    if (!cfg?.token || !cfg?.gistId) return;
+    syncingRef.current = true;
+    backupCards();
+    try {
+      setSyncStatus('syncing');
+      // Read remote first to avoid overwriting remote-only cards
+      const localCards = loadCards();
+      let merged = localCards;
+      try {
+        const remote = await readGist(cfg.token, cfg.gistId);
+        const remoteCards = remote?.cards || [];
+        if (remoteCards.length > 0) {
+          const localPhotoMap = new Map(localCards.filter(c => c.photo).map(c => [c.id, c.photo]));
+          const remoteWithPhotos = remoteCards.map(c => {
+            const { syncPhoto, ...data } = c;
+            return { ...data, photo: localPhotoMap.get(c.id) || syncPhoto || '' };
+          });
+          merged = mergeCards(localCards, remoteWithPhotos);
+          saveMergedCards(merged);
+        }
+      } catch(e) { /* remote read failed — push local as-is */ }
+      const syncPayload = await buildSyncPayload(merged);
+      await writeGist(cfg.token, cfg.gistId, { cards: syncPayload, lastSync: Date.now() });
       setSyncStatus('done');
       setTimeout(() => setSyncStatus(''), 1500);
     } catch(e) {
@@ -330,61 +412,35 @@ function App() {
     } finally { syncingRef.current = false; }
   }
 
-  // PULL: download cards from Gist and MERGE with local
+  // PULL: merge remote into local (never discard local-only cards)
   async function pullFromGist(silent) {
+    if (syncingRef.current) return;
     const cfg = getSyncConfig();
-    if (!cfg?.token || !cfg?.gistId || syncingRef.current) return;
+    if (!cfg?.token || !cfg?.gistId) return;
     syncingRef.current = true;
     backupCards();
     try {
       if (!silent) setSyncStatus('syncing');
       const remote = await readGist(cfg.token, cfg.gistId);
       const remoteCards = remote?.cards || [];
-      if (remoteCards.length === 0 && loadCards().length > 0) {
-        // Remote is empty but we have local data - push instead
+      const localCards = loadCards();
+      if (remoteCards.length === 0 && localCards.length > 0) {
         syncingRef.current = false;
         await pushToGist();
         return;
       }
-      const localCards = loadCards();
-      // Restore photos: prefer local full-res, fallback to syncPhoto
       const localPhotoMap = new Map(localCards.filter(c => c.photo).map(c => [c.id, c.photo]));
       const remoteWithPhotos = remoteCards.map(c => {
         const { syncPhoto, ...data } = c;
         return { ...data, photo: localPhotoMap.get(c.id) || syncPhoto || '' };
       });
-      // Merge: keep both local-only and remote-only cards
-      const finalCards = mergeCards(localCards, remoteWithPhotos);
-      setCards(finalCards);
+      const merged = mergeCards(localCards, remoteWithPhotos);
+      saveMergedCards(merged);
       if (!silent) { setSyncStatus('done'); setTimeout(() => setSyncStatus(''), 1500); }
     } catch(e) {
       console.error('Pull error:', e);
       if (!silent) { setSyncStatus('error'); setTimeout(() => setSyncStatus(''), 3000); }
     } finally { syncingRef.current = false; }
-  }
-
-  // ALL auto-sync DISABLED — manual only via sync screen buttons
-
-  // Manual sync: pull first, then push if local has newer changes
-  async function doSync() {
-    const cfg = getSyncConfig();
-    if (!cfg?.token) { setScreen('sync'); return; }
-    if (!cfg.gistId) {
-      try {
-        setSyncStatus('syncing');
-        const existing = await findGist(cfg.token);
-        let gistId = existing ? existing.id : null;
-        if (!gistId) {
-          const created = await createGist(cfg.token, { cards: [], lastSync: Date.now() });
-          gistId = created.id;
-        }
-        saveSyncConfig({ ...cfg, gistId });
-      } catch(e) { setSyncStatus('error'); setTimeout(() => setSyncStatus(''), 3000); return; }
-    }
-    // Pull first to get remote state
-    await pullFromGist(false);
-    // Then push local (with merged photos) to Gist
-    await pushToGist();
   }
 
   const filtered = useMemo(() => {
@@ -491,7 +547,7 @@ function App() {
   // ─── Screens ───
   if (screen === 'add') return <CardForm onSave={addCard} onCancel={() => setScreen('list')} />;
   if (screen === 'edit' && editCard) return <CardForm card={editCard} onSave={updateCard} onCancel={() => { setScreen('detail'); setEditCard(null); }} />;
-  if (screen === 'sync') return <SyncScreen onBack={() => setScreen('list')} onSync={doSync} onPush={pushToGist} onPull={() => pullFromGist(false)} onRestore={(cards) => setCards(cards)} cardCount={cards.length} />;
+  if (screen === 'sync') return <SyncScreen onBack={() => setScreen('list')} onSync={doSync} onPush={pushToGist} onPull={() => pullFromGist(false)} onRestore={(restored) => saveMergedCards(restored)} cardCount={cards.length} />;
   if (screen === 'detail' && selectedCard) {
     const cat = CATEGORIES.find(x => x.value === selectedCard.category);
     return (
