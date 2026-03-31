@@ -12,6 +12,7 @@
 <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
 <style>
   * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
@@ -494,6 +495,40 @@ function App() {
   );
 }
 
+// ─── OCR: extract card name from top portion ───
+async function ocrCardName(photoDataUrl) {
+  try {
+    // Crop top 30% of image for name extraction
+    const img = new Image();
+    await new Promise((resolve, reject) => { img.onload = resolve; img.onerror = reject; img.src = photoDataUrl; });
+    const cropH = Math.round(img.height * 0.30);
+    const canvas = document.createElement('canvas');
+    canvas.width = img.width; canvas.height = cropH;
+    const ctx = canvas.getContext('2d');
+    // White background + high contrast
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, img.width, cropH, 0, 0, canvas.width, canvas.height);
+    // Increase contrast
+    const idata = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const d = idata.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const avg = (d[i] + d[i+1] + d[i+2]) / 3;
+      const v = avg > 140 ? 255 : 0;
+      d[i] = d[i+1] = d[i+2] = v;
+    }
+    ctx.putImageData(idata, 0, 0);
+    const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+    const result = await Tesseract.recognize(blob, 'eng+jpn+kor', { logger: () => {} });
+    const text = (result.data.text || '').trim();
+    // Clean: take first meaningful line, remove noise
+    const lines = text.split('\n').map(l => l.trim()).filter(l => l.length >= 2);
+    return lines[0] || '';
+  } catch (e) {
+    console.warn('OCR failed:', e);
+    return '';
+  }
+}
+
 // ─── Photo Cropper (adjustable ratio) ───
 const CROP_RATIOS = [
   { label: '세로', icon: '▯', ratio: 63 / 88 },
@@ -663,7 +698,23 @@ function CardForm({ card, onSave, onCancel }) {
   const [memo, setMemo] = useState(card?.memo || '');
   const [photo, setPhoto] = useState(card?.photo || '');
   const [cropSrc, setCropSrc] = useState(null);
+  const [ocrStatus, setOcrStatus] = useState(''); // '', 'loading', 'done'
+  const [ocrSuggestion, setOcrSuggestion] = useState('');
   const fileRef = useRef(null);
+
+  async function handleCropDone(result) {
+    setPhoto(result);
+    setCropSrc(null);
+    if (!name.trim()) {
+      setOcrStatus('loading');
+      setOcrSuggestion('');
+      const extracted = await ocrCardName(result);
+      setOcrStatus('done');
+      if (extracted) {
+        setOcrSuggestion(extracted);
+      }
+    }
+  }
 
   function handlePhoto(e) {
     const file = e.target.files[0];
@@ -706,7 +757,7 @@ function CardForm({ card, onSave, onCancel }) {
       </div>
 
       {/* Photo Cropper Modal - outside form to avoid submit */}
-      {cropSrc && <PhotoCropper src={cropSrc} onCrop={(result) => { setPhoto(result); setCropSrc(null); }} onCancel={() => setCropSrc(null)} />}
+      {cropSrc && <PhotoCropper src={cropSrc} onCrop={handleCropDone} onCancel={() => setCropSrc(null)} />}
 
       <form onSubmit={handleSubmit}>
         {/* Photo */}
@@ -729,7 +780,16 @@ function CardForm({ card, onSave, onCancel }) {
         {/* Name */}
         <div className="form-field">
           <label>카드 이름 *</label>
-          <input type="text" value={name} onChange={e => setName(e.target.value)} placeholder="예: 리자몽 VMAX HR" autoFocus />
+          <input type="text" value={name} onChange={e => { setName(e.target.value); setOcrSuggestion(''); }} placeholder="예: 리자몽 VMAX HR" autoFocus />
+          {ocrStatus === 'loading' && (
+            <div style={{ fontSize: 12, color: '#6366f1', marginTop: 4 }}>🔍 카드명 인식 중...</div>
+          )}
+          {ocrSuggestion && (
+            <button type="button" onClick={() => { setName(ocrSuggestion); setOcrSuggestion(''); }}
+              style={{ marginTop: 6, background: 'rgba(99,102,241,0.15)', border: '1px solid #6366f1', borderRadius: 8, padding: '8px 12px', color: '#a5b4fc', fontSize: 13, cursor: 'pointer', width: '100%', textAlign: 'left' }}>
+              💡 인식 결과: <strong style={{ color: '#e2e8f0' }}>{ocrSuggestion}</strong><span style={{ float: 'right', fontSize: 11 }}>탭하여 적용</span>
+            </button>
+          )}
         </div>
 
         {/* Category */}
