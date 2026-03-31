@@ -494,9 +494,16 @@ function App() {
   );
 }
 
-// ─── Photo Cropper (card ratio 63:88) ───
+// ─── Photo Cropper (adjustable ratio) ───
+const CROP_RATIOS = [
+  { label: '세로', icon: '▯', ratio: 63 / 88 },
+  { label: '가로', icon: '▭', ratio: 88 / 63 },
+  { label: '정방', icon: '⬜', ratio: 1 },
+  { label: '자유', icon: '⊡', ratio: 0 },
+];
 function PhotoCropper({ src, onCrop, onCancel }) {
-  const RATIO = 63 / 88; // width / height
+  const [ratioIdx, setRatioIdx] = useState(0);
+  const RATIO = CROP_RATIOS[ratioIdx].ratio;
   const containerRef = useRef(null);
   const imgRef = useRef(null);
   const [imgLoaded, setImgLoaded] = useState(false);
@@ -505,20 +512,40 @@ function PhotoCropper({ src, onCrop, onCancel }) {
   const dragRef = useRef({ dragging: false, startX: 0, startY: 0, origX: 0, origY: 0 });
   const [cropBox, setCropBox] = useState({ x: 0, y: 0, w: 0, h: 0 });
 
-  useEffect(() => {
-    if (!imgLoaded || !containerRef.current) return;
+  function recalcBox(rIdx) {
+    if (!containerRef.current) return;
     const cw = containerRef.current.clientWidth;
     const ch = containerRef.current.clientHeight;
-    const boxH = Math.min(ch * 0.85, (cw * 0.7) / RATIO);
-    const boxW = boxH * RATIO;
+    const r = CROP_RATIOS[rIdx].ratio;
+    let boxW, boxH;
+    if (r === 0) {
+      boxW = cw * 0.7; boxH = ch * 0.7;
+    } else if (r >= 1) {
+      boxW = Math.min(cw * 0.85, ch * 0.7 * r);
+      boxH = boxW / r;
+    } else {
+      boxH = Math.min(ch * 0.85, (cw * 0.7) / r);
+      boxW = boxH * r;
+    }
     setCropBox({ x: (cw - boxW) / 2, y: (ch - boxH) / 2, w: boxW, h: boxH });
+  }
 
+  useEffect(() => {
+    if (!imgLoaded || !containerRef.current) return;
+    recalcBox(ratioIdx);
+    const cw = containerRef.current.clientWidth;
+    const ch = containerRef.current.clientHeight;
     const img = imgRef.current;
     const iw = img.naturalWidth, ih = img.naturalHeight;
-    const fitScale = Math.max(boxW / iw, boxH / ih) * 1.05;
+    const fitScale = Math.max((cw * 0.7) / iw, (ch * 0.7) / ih) * 1.05;
     setScale(fitScale);
     setPos({ x: (cw - iw * fitScale) / 2, y: (ch - ih * fitScale) / 2 });
   }, [imgLoaded]);
+
+  function switchRatio(newIdx) {
+    setRatioIdx(newIdx);
+    recalcBox(newIdx);
+  }
 
   function handleWheel(e) {
     e.preventDefault();
@@ -545,14 +572,14 @@ function PhotoCropper({ src, onCrop, onCancel }) {
   function doCrop() {
     const img = imgRef.current;
     if (!img) return;
-    const iw = img.naturalWidth, ih = img.naturalHeight;
     const sx = (cropBox.x - pos.x) / scale;
     const sy = (cropBox.y - pos.y) / scale;
     const sw = cropBox.w / scale;
     const sh = cropBox.h / scale;
+    const curRatio = RATIO || (cropBox.w / cropBox.h);
 
     const outW = Math.min(800, Math.round(sw));
-    const outH = Math.round(outW / RATIO);
+    const outH = Math.round(outW / curRatio);
     const canvas = document.createElement('canvas');
     canvas.width = outW; canvas.height = outH;
     const ctx = canvas.getContext('2d');
@@ -567,7 +594,15 @@ function PhotoCropper({ src, onCrop, onCancel }) {
         <span style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600 }}>사진 자르기</span>
         <button onClick={doCrop} style={{ background: '#6366f1', border: 'none', color: 'white', padding: '8px 16px', borderRadius: 8, fontSize: 14, cursor: 'pointer', fontWeight: 600 }}>✂️ 자르기</button>
       </div>
-      <div style={{ padding: '0 16px 8px', textAlign: 'center' }}>
+      <div style={{ padding: '0 16px 4px', display: 'flex', justifyContent: 'center', gap: 6 }}>
+        {CROP_RATIOS.map((r, i) => (
+          <button key={r.label} onClick={() => switchRatio(i)}
+            style={{ background: i === ratioIdx ? '#6366f1' : '#334155', border: 'none', color: i === ratioIdx ? 'white' : '#94a3b8', padding: '6px 12px', borderRadius: 6, fontSize: 12, cursor: 'pointer', fontWeight: i === ratioIdx ? 700 : 400 }}>
+            {r.icon} {r.label}
+          </button>
+        ))}
+      </div>
+      <div style={{ padding: '4px 16px 8px', textAlign: 'center' }}>
         <input type="range" min="10" max="300" value={Math.round(scale * 100)} onChange={e => setScale(e.target.value / 100)}
           style={{ width: '60%', maxWidth: 250, accentColor: '#6366f1' }} />
         <span style={{ color: '#64748b', fontSize: 12, marginLeft: 8 }}>{Math.round(scale * 100)}%</span>
