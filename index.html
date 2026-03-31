@@ -51,7 +51,50 @@
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useEffect, useRef, useMemo } = React;
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+// ─── Gist Cloud Sync ───
+const GIST_FILENAME = 'tcg_collection_sync.json';
+function getSyncConfig() {
+  try { return JSON.parse(localStorage.getItem('tcg_sync_config') || 'null'); } catch { return null; }
+}
+function saveSyncConfig(cfg) { localStorage.setItem('tcg_sync_config', JSON.stringify(cfg)); }
+
+async function gistAPI(path, token, opts = {}) {
+  const res = await fetch('https://api.github.com/gists' + path, {
+    ...opts,
+    headers: { 'Authorization': 'token ' + token, 'Accept': 'application/vnd.github.v3+json', ...(opts.headers || {}) },
+  });
+  if (!res.ok) throw new Error('Gist API ' + res.status);
+  return res.json();
+}
+async function findGist(token) {
+  const gists = await gistAPI('?per_page=100', token);
+  return gists.find(g => g.files && g.files[GIST_FILENAME]);
+}
+async function createGist(token, data) {
+  return gistAPI('', token, { method: 'POST', body: JSON.stringify({ description: 'TCG Collection Sync', public: false, files: { [GIST_FILENAME]: { content: JSON.stringify(data) } } }) });
+}
+async function readGist(token, gistId) {
+  const g = await gistAPI('/' + gistId, token);
+  const raw = g.files[GIST_FILENAME]?.content;
+  return raw ? JSON.parse(raw) : null;
+}
+async function writeGist(token, gistId, data) {
+  return gistAPI('/' + gistId, token, { method: 'PATCH', body: JSON.stringify({ files: { [GIST_FILENAME]: { content: JSON.stringify(data) } } }) });
+}
+function mergeCards(local, remote) {
+  const map = new Map();
+  const all = [...remote, ...local];
+  for (const card of all) {
+    const existing = map.get(card.id);
+    if (!existing || (card.updatedAt || card.createdAt || 0) > (existing.updatedAt || existing.createdAt || 0)) {
+      map.set(card.id, card);
+    }
+  }
+  return [...map.values()].sort((a, b) => b.createdAt - a.createdAt);
+}
+function stripPhotos(cards) { return cards.map(({ photo, ...rest }) => rest); }
 
 const CATEGORIES = [
   { value: 'pokemon', label: '포켓몬', emoji: '⚡', badge: 'badge-pokemon' },
@@ -85,7 +128,7 @@ function formatDate(d) {
 
 function App() {
   const [cards, setCards] = useState(loadCards);
-  const [screen, setScreen] = useState('list'); // list, add, detail, edit
+  const [screen, setScreen] = useState('list'); // list, add, detail, edit, sync
   const [selectedCard, setSelectedCard] = useState(null);
   const [editCard, setEditCard] = useState(null);
   const [filter, setFilter] = useState('all');
@@ -93,8 +136,73 @@ function App() {
   const [sort, setSort] = useState('newest');
   const [showExport, setShowExport] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [syncStatus, setSyncStatus] = useState('');
+  const syncTimer = useRef(null);
 
   useEffect(() => { saveCards(cards); }, [cards]);
+
+  // Auto-sync after card changes (3s debounce)
+  const autoSync = useCallback(() => {
+    const cfg = getSyncConfig();
+    if (!cfg?.token || !cfg?.gistId) return;
+    if (syncTimer.current) clearTimeout(syncTimer.current);
+    syncTimer.current = setTimeout(async () => {
+      try {
+        setSyncStatus('syncing');
+        const remote = await readGist(cfg.token, cfg.gistId);
+        const localStripped = stripPhotos(loadCards());
+        const merged = mergeCards(localStripped, remote?.cards || []);
+        await writeGist(cfg.token, cfg.gistId, { cards: merged, lastSync: Date.now() });
+        // Merge back remote-only cards (without overwriting local photos)
+        const localMap = new Map(loadCards().map(c => [c.id, c]));
+        const finalCards = merged.map(c => {
+          const loc = localMap.get(c.id);
+          return loc ? { ...c, photo: loc.photo } : c;
+        });
+        setCards(finalCards);
+        setSyncStatus('done');
+        setTimeout(() => setSyncStatus(''), 2000);
+      } catch { setSyncStatus('error'); setTimeout(() => setSyncStatus(''), 3000); }
+    }, 3000);
+  }, []);
+
+  // Trigger auto-sync on card changes
+  const prevCount = useRef(cards.length);
+  useEffect(() => {
+    if (prevCount.current !== cards.length) { autoSync(); }
+    prevCount.current = cards.length;
+  }, [cards.length, autoSync]);
+
+  // Manual sync
+  async function doSync() {
+    const cfg = getSyncConfig();
+    if (!cfg?.token) { setScreen('sync'); return; }
+    try {
+      setSyncStatus('syncing');
+      let gistId = cfg.gistId;
+      if (!gistId) {
+        const existing = await findGist(cfg.token);
+        if (existing) { gistId = existing.id; }
+        else {
+          const created = await createGist(cfg.token, { cards: stripPhotos(cards), lastSync: Date.now() });
+          gistId = created.id;
+        }
+        saveSyncConfig({ ...cfg, gistId });
+      }
+      const remote = await readGist(cfg.token, gistId);
+      const localStripped = stripPhotos(cards);
+      const merged = mergeCards(localStripped, remote?.cards || []);
+      await writeGist(cfg.token, gistId, { cards: merged, lastSync: Date.now() });
+      const localMap = new Map(cards.map(c => [c.id, c]));
+      const finalCards = merged.map(c => {
+        const loc = localMap.get(c.id);
+        return loc ? { ...c, photo: loc.photo } : c;
+      });
+      setCards(finalCards);
+      setSyncStatus('done');
+      setTimeout(() => setSyncStatus(''), 2000);
+    } catch(e) { setSyncStatus('error'); setTimeout(() => setSyncStatus(''), 3000); }
+  }
 
   const filtered = useMemo(() => {
     let list = [...cards];
@@ -126,16 +234,18 @@ function App() {
     setScreen('list');
   }
   function updateCard(updated) {
-    setCards(prev => prev.map(c => c.id === updated.id ? { ...c, ...updated } : c));
+    setCards(prev => prev.map(c => c.id === updated.id ? { ...c, ...updated, updatedAt: Date.now() } : c));
     setSelectedCard(prev => ({ ...prev, ...updated }));
     setScreen('detail');
     setEditCard(null);
+    autoSync();
   }
   function deleteCard(id) {
     setCards(prev => prev.filter(c => c.id !== id));
     setSelectedCard(null);
     setShowDeleteConfirm(false);
     setScreen('list');
+    autoSync();
   }
 
   function exportCSV() {
@@ -191,6 +301,7 @@ function App() {
   // ─── Screens ───
   if (screen === 'add') return <CardForm onSave={addCard} onCancel={() => setScreen('list')} />;
   if (screen === 'edit' && editCard) return <CardForm card={editCard} onSave={updateCard} onCancel={() => { setScreen('detail'); setEditCard(null); }} />;
+  if (screen === 'sync') return <SyncScreen onBack={() => setScreen('list')} onSync={doSync} />;
   if (screen === 'detail' && selectedCard) {
     const cat = CATEGORIES.find(x => x.value === selectedCard.category);
     return (
@@ -265,6 +376,10 @@ function App() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <h1 style={{ fontSize: 22, fontWeight: 800 }}>🃏 My TCG</h1>
         <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn btn-outline" style={{ padding: '8px 12px', fontSize: 13 }} onClick={doSync} title="클라우드 동기화">
+            {syncStatus === 'syncing' ? '⏳' : syncStatus === 'done' ? '✅' : syncStatus === 'error' ? '❌' : '☁️'}
+          </button>
+          <button className="btn btn-outline" style={{ padding: '8px 12px', fontSize: 13 }} onClick={() => setScreen('sync')} title="동기화 설정">⚙️</button>
           <button className="btn btn-outline" style={{ padding: '8px 12px', fontSize: 13 }} onClick={() => setShowExport(true)}>📁</button>
           <button className="btn btn-primary" style={{ padding: '8px 16px' }} onClick={() => setScreen('add')}>+ 등록</button>
         </div>
@@ -482,6 +597,70 @@ function CardForm({ card, onSave, onCancel }) {
           {card ? '✏️ 수정 완료' : '✅ 등록하기'}
         </button>
       </form>
+    </div>
+  );
+}
+
+function SyncScreen({ onBack, onSync }) {
+  const [cfg, setCfg] = useState(getSyncConfig() || { token: '', gistId: '' });
+  const [status, setStatus] = useState('');
+
+  async function handleSave() {
+    if (!cfg.token.trim()) { alert('GitHub 토큰을 입력해주세요.'); return; }
+    setStatus('연결 중...');
+    try {
+      const existing = await findGist(cfg.token.trim());
+      const gistId = existing ? existing.id : null;
+      const newCfg = { token: cfg.token.trim(), gistId };
+      saveSyncConfig(newCfg);
+      setCfg(newCfg);
+      setStatus(gistId ? '기존 데이터 발견! 동기화하세요.' : '새로 시작합니다. 동기화하세요.');
+    } catch(e) {
+      setStatus('토큰이 올바르지 않습니다.');
+    }
+  }
+
+  function handleDisconnect() {
+    saveSyncConfig(null);
+    setCfg({ token: '', gistId: '' });
+    setStatus('연결 해제됨');
+  }
+
+  return (
+    <div style={{ maxWidth: 500, margin: '0 auto', padding: 16 }}>
+      <button onClick={onBack} style={{ background: 'none', border: 'none', fontSize: 15, cursor: 'pointer', color: '#94a3b8', marginBottom: 16 }}>← 돌아가기</button>
+      <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 20 }}>☁️ 클라우드 동기화</h2>
+      
+      <div style={{ background: '#1e293b', borderRadius: 12, padding: 16, marginBottom: 16, border: '1px solid #334155' }}>
+        <p style={{ fontSize: 13, color: '#94a3b8', marginBottom: 12, lineHeight: 1.6 }}>
+          GitHub Gist를 통해 여러 기기에서 카드 데이터를 동기화합니다.<br/>
+          <span style={{ color: '#f59e0b' }}>※ 사진은 용량 문제로 동기화되지 않습니다 (기기별 로컬 저장)</span>
+        </p>
+        
+        <label style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, display: 'block' }}>GitHub Personal Access Token (gist 권한)</label>
+        <input type="password" value={cfg.token} onChange={e => setCfg(prev => ({ ...prev, token: e.target.value }))} placeholder="ghp_xxxxxxxxxxxx" style={{ marginBottom: 12 }} />
+        
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn btn-primary" style={{ flex: 1 }} onClick={handleSave}>연결</button>
+          {cfg.token && <button className="btn btn-outline" onClick={handleDisconnect}>해제</button>}
+        </div>
+        
+        {status && <p style={{ fontSize: 13, marginTop: 8, color: status.includes('올바르지') ? '#ef4444' : '#34d399' }}>{status}</p>}
+      </div>
+
+      {cfg.gistId && (
+        <button className="btn btn-primary" style={{ width: '100%', padding: 14, fontSize: 16 }} onClick={() => { onSync(); onBack(); }}>
+          🔄 지금 동기화
+        </button>
+      )}
+
+      <div style={{ marginTop: 20, padding: 12, background: '#0f172a', borderRadius: 8, fontSize: 12, color: '#64748b', lineHeight: 1.8 }}>
+        <strong>토큰 발급 방법:</strong><br/>
+        1. <span style={{ color: '#94a3b8' }}>github.com → Settings → Developer settings → Personal access tokens → Tokens (classic)</span><br/>
+        2. <span style={{ color: '#94a3b8' }}>Generate new token → gist 체크 → Generate</span><br/>
+        3. 발급된 토큰을 위에 붙여넣기<br/>
+        ※ 지후네 일본어랑 같은 토큰 사용 가능
+      </div>
     </div>
   );
 }
