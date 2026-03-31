@@ -58,7 +58,7 @@
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useEffect, useRef, useMemo, useCallback } = React;
+const { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } = React;
 
 // ─── Gist Cloud Sync ───
 const GIST_FILENAME = 'tcg_collection_sync.json';
@@ -605,26 +605,51 @@ function PhotoCropper({ src, onCrop, onCancel }) {
     setCropBox({ x: (cw - boxW) / 2, y: (ch - boxH) / 2, w: boxW, h: boxH });
   }
 
-  useEffect(() => {
-    if (!imgLoaded || !containerRef.current) return;
-    recalcBox(ratioIdx);
-    const cw = containerRef.current.clientWidth;
-    const ch = containerRef.current.clientHeight;
+  function centerImage(s, cw, ch) {
     const img = imgRef.current;
+    if (!img) return { x: 0, y: 0 };
     const iw = img.naturalWidth, ih = img.naturalHeight;
-    const fitScale = Math.max((cw * 0.7) / iw, (ch * 0.7) / ih) * 1.05;
-    setScale(fitScale);
-    setPos({ x: (cw - iw * fitScale) / 2, y: (ch - ih * fitScale) / 2 });
+    return { x: (cw - iw * s) / 2, y: (ch - ih * s) / 2 };
+  }
+
+  useLayoutEffect(() => {
+    if (!imgLoaded || !containerRef.current) return;
+    requestAnimationFrame(() => {
+      if (!containerRef.current) return;
+      recalcBox(ratioIdx);
+      const cw = containerRef.current.clientWidth;
+      const ch = containerRef.current.clientHeight;
+      const img = imgRef.current;
+      const iw = img.naturalWidth, ih = img.naturalHeight;
+      const fitScale = Math.max((cw * 0.7) / iw, (ch * 0.7) / ih) * 1.05;
+      setScale(fitScale);
+      setPos(centerImage(fitScale, cw, ch));
+    });
   }, [imgLoaded]);
 
   function switchRatio(newIdx) {
     setRatioIdx(newIdx);
     recalcBox(newIdx);
+    if (containerRef.current && imgRef.current) {
+      const cw = containerRef.current.clientWidth;
+      const ch = containerRef.current.clientHeight;
+      setPos(centerImage(scale, cw, ch));
+    }
+  }
+
+  function zoomAtCenter(newScale) {
+    newScale = Math.max(0.1, Math.min(5, newScale));
+    const cx = cropBox.x + cropBox.w / 2;
+    const cy = cropBox.y + cropBox.h / 2;
+    const ix = (cx - pos.x) / scale;
+    const iy = (cy - pos.y) / scale;
+    setScale(newScale);
+    setPos({ x: cx - ix * newScale, y: cy - iy * newScale });
   }
 
   function handleWheel(e) {
     e.preventDefault();
-    setScale(s => Math.max(0.1, Math.min(5, s - e.deltaY * 0.001)));
+    zoomAtCenter(scale - e.deltaY * 0.001);
   }
 
   function startDrag(cx, cy) {
@@ -656,7 +681,7 @@ function PhotoCropper({ src, onCrop, onCancel }) {
     if (e.touches.length === 2 && pinchRef.current.active) {
       const dist = getTouchDist(e.touches);
       const newScale = pinchRef.current.startScale * (dist / pinchRef.current.startDist);
-      setScale(Math.max(0.1, Math.min(5, newScale)));
+      zoomAtCenter(newScale);
     } else if (e.touches.length === 1 && !pinchRef.current.active) {
       moveDrag(e.touches[0].clientX, e.touches[0].clientY);
     }
@@ -700,11 +725,11 @@ function PhotoCropper({ src, onCrop, onCancel }) {
         ))}
       </div>
       <div style={{ padding: '4px 16px 8px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8 }}>
-        <button onClick={() => setScale(s => Math.max(0.1, s - 0.1))} style={{ background: '#334155', border: 'none', color: 'white', width: 36, height: 36, borderRadius: 8, fontSize: 18, cursor: 'pointer', fontWeight: 700 }}>−</button>
-        <button onClick={() => setScale(s => Math.max(0.1, s - 0.02))} style={{ background: '#334155', border: 'none', color: '#94a3b8', width: 30, height: 30, borderRadius: 6, fontSize: 13, cursor: 'pointer' }}>−</button>
+        <button onClick={() => zoomAtCenter(scale - 0.1)} style={{ background: '#334155', border: 'none', color: 'white', width: 36, height: 36, borderRadius: 8, fontSize: 18, cursor: 'pointer', fontWeight: 700 }}>−</button>
+        <button onClick={() => zoomAtCenter(scale - 0.02)} style={{ background: '#334155', border: 'none', color: '#94a3b8', width: 30, height: 30, borderRadius: 6, fontSize: 13, cursor: 'pointer' }}>−</button>
         <span style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, minWidth: 48, textAlign: 'center' }}>{Math.round(scale * 100)}%</span>
-        <button onClick={() => setScale(s => Math.min(5, s + 0.02))} style={{ background: '#334155', border: 'none', color: '#94a3b8', width: 30, height: 30, borderRadius: 6, fontSize: 13, cursor: 'pointer' }}>+</button>
-        <button onClick={() => setScale(s => Math.min(5, s + 0.1))} style={{ background: '#334155', border: 'none', color: 'white', width: 36, height: 36, borderRadius: 8, fontSize: 18, cursor: 'pointer', fontWeight: 700 }}>+</button>
+        <button onClick={() => zoomAtCenter(scale + 0.02)} style={{ background: '#334155', border: 'none', color: '#94a3b8', width: 30, height: 30, borderRadius: 6, fontSize: 13, cursor: 'pointer' }}>+</button>
+        <button onClick={() => zoomAtCenter(scale + 0.1)} style={{ background: '#334155', border: 'none', color: 'white', width: 36, height: 36, borderRadius: 8, fontSize: 18, cursor: 'pointer', fontWeight: 700 }}>+</button>
       </div>
       <div ref={containerRef} style={{ flex: 1, position: 'relative', overflow: 'hidden', touchAction: 'none', cursor: 'grab' }}
         onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}
