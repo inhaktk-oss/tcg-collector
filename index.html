@@ -57,6 +57,14 @@
 </head>
 <body>
 <div id="root"></div>
+<script>
+// Force SW update & re-register
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js').then(reg => {
+    reg.update();
+  });
+}
+</script>
 <script type="text/babel">
 const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
@@ -1019,6 +1027,19 @@ function SyncScreen({ onBack, onSync }) {
 }
 
 ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+<script>
+// Fallback: if babel transform fails, show error message
+window.addEventListener('error', function(e) {
+  var root = document.getElementById('root');
+  if (root && !root.hasChildNodes()) {
+    root.innerHTML = '<div style="padding:40px;color:#f87171;font-family:sans-serif;text-align:center">' +
+      '<h2>앱 로딩 오류</h2><p>' + (e.message || '알 수 없는 오류') + '</p>' +
+      '<button onclick="caches.keys().then(k=>Promise.all(k.map(c=>caches.delete(c)))).then(()=>location.reload())" ' +
+      'style="margin-top:16px;padding:12px 24px;background:#6366f1;color:white;border:none;border-radius:8px;font-size:16px;cursor:pointer">' +
+      '캐시 삭제 후 새로고침</button></div>';
+  }
+});
 </script>
 </body>
 </html>
