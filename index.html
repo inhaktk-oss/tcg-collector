@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>My TCG Collection</title>
+<link rel="manifest" href="./manifest.json">
+<meta name="theme-color" content="#1e293b">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="./icon-192.png">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+<style>
+  * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; margin: 0; min-height: 100vh; }
+  input, select, textarea { color: #e2e8f0; background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 10px 12px; width: 100%; font-size: 15px; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: #6366f1; box-shadow: 0 0 0 2px rgba(99,102,241,0.3); }
+  input[type="file"] { padding: 8px; font-size: 13px; }
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
+  .card-item { background: #1e293b; border-radius: 12px; overflow: hidden; border: 1px solid #334155; transition: transform 0.15s, box-shadow 0.15s; cursor: pointer; }
+  .card-item:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+  .card-img { width: 100%; aspect-ratio: 3/4; object-fit: cover; background: #334155; }
+  .card-noimg { width: 100%; aspect-ratio: 3/4; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #334155, #1e293b); font-size: 48px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 600; }
+  .badge-pokemon { background: #fbbf24; color: #1e293b; }
+  .badge-sports { background: #34d399; color: #1e293b; }
+  .badge-yugioh { background: #a78bfa; color: #1e293b; }
+  .badge-other { background: #64748b; color: #e2e8f0; }
+  .stat-card { background: linear-gradient(135deg, #1e293b, #0f172a); border: 1px solid #334155; border-radius: 12px; padding: 16px; text-align: center; }
+  .btn { padding: 10px 20px; border-radius: 10px; font-weight: 600; font-size: 14px; border: none; cursor: pointer; transition: all 0.15s; }
+  .btn-primary { background: #6366f1; color: white; }
+  .btn-primary:hover { background: #4f46e5; }
+  .btn-danger { background: #ef4444; color: white; }
+  .btn-danger:hover { background: #dc2626; }
+  .btn-outline { background: transparent; border: 1px solid #475569; color: #94a3b8; }
+  .btn-outline:hover { border-color: #6366f1; color: #6366f1; }
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 50; display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .modal-content { background: #1e293b; border-radius: 16px; width: 100%; max-width: 500px; max-height: 90vh; overflow-y: auto; padding: 24px; border: 1px solid #334155; }
+  .tab-active { border-bottom: 2px solid #6366f1; color: #6366f1; }
+  .tab-inactive { border-bottom: 2px solid transparent; color: #64748b; }
+  .empty-state { text-align: center; padding: 60px 20px; color: #64748b; }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+  @media (max-width: 640px) { .card-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useMemo } = React;
+
+const CATEGORIES = [
+  { value: 'pokemon', label: '포켓몬', emoji: '⚡', badge: 'badge-pokemon' },
+  { value: 'sports', label: '스포츠', emoji: '⚾', badge: 'badge-sports' },
+  { value: 'yugioh', label: '유희왕', emoji: '🃏', badge: 'badge-yugioh' },
+  { value: 'other', label: '기타', emoji: '🎴', badge: 'badge-other' },
+];
+
+const GRADES = ['', 'PSA 10', 'PSA 9', 'PSA 8', 'PSA 7', 'PSA 6', 'BGS 10', 'BGS 9.5', 'BGS 9', 'CGC 10', 'CGC 9.5', 'CGC 9', 'Raw(미등급)'];
+const SORT_OPTIONS = [
+  { value: 'newest', label: '최근 등록순' },
+  { value: 'oldest', label: '오래된순' },
+  { value: 'price-high', label: '구매가 높은순' },
+  { value: 'price-low', label: '구매가 낮은순' },
+  { value: 'name', label: '이름순' },
+];
+
+function loadCards() {
+  try { return JSON.parse(localStorage.getItem('tcg_cards') || '[]'); } catch { return []; }
+}
+function saveCards(cards) { localStorage.setItem('tcg_cards', JSON.stringify(cards)); }
+
+function formatPrice(n) {
+  if (!n && n !== 0) return '-';
+  return Number(n).toLocaleString('ko-KR') + '원';
+}
+function formatDate(d) {
+  if (!d) return '-';
+  return d.replace(/-/g, '.');
+}
+
+function App() {
+  const [cards, setCards] = useState(loadCards);
+  const [screen, setScreen] = useState('list'); // list, add, detail, edit
+  const [selectedCard, setSelectedCard] = useState(null);
+  const [editCard, setEditCard] = useState(null);
+  const [filter, setFilter] = useState('all');
+  const [search, setSearch] = useState('');
+  const [sort, setSort] = useState('newest');
+  const [showExport, setShowExport] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+
+  useEffect(() => { saveCards(cards); }, [cards]);
+
+  const filtered = useMemo(() => {
+    let list = [...cards];
+    if (filter !== 'all') list = list.filter(c => c.category === filter);
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      list = list.filter(c => c.name.toLowerCase().includes(q) || (c.memo || '').toLowerCase().includes(q) || (c.seller || '').toLowerCase().includes(q));
+    }
+    switch (sort) {
+      case 'oldest': list.sort((a, b) => a.createdAt - b.createdAt); break;
+      case 'price-high': list.sort((a, b) => (b.price || 0) - (a.price || 0)); break;
+      case 'price-low': list.sort((a, b) => (a.price || 0) - (b.price || 0)); break;
+      case 'name': list.sort((a, b) => a.name.localeCompare(b.name, 'ko')); break;
+      default: list.sort((a, b) => b.createdAt - a.createdAt);
+    }
+    return list;
+  }, [cards, filter, search, sort]);
+
+  const stats = useMemo(() => {
+    const total = cards.length;
+    const totalSpent = cards.reduce((s, c) => s + (c.price || 0), 0);
+    const byCat = {};
+    CATEGORIES.forEach(cat => { byCat[cat.value] = cards.filter(c => c.category === cat.value).length; });
+    return { total, totalSpent, byCat };
+  }, [cards]);
+
+  function addCard(card) {
+    setCards(prev => [...prev, { ...card, id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), createdAt: Date.now() }]);
+    setScreen('list');
+  }
+  function updateCard(updated) {
+    setCards(prev => prev.map(c => c.id === updated.id ? { ...c, ...updated } : c));
+    setSelectedCard(prev => ({ ...prev, ...updated }));
+    setScreen('detail');
+    setEditCard(null);
+  }
+  function deleteCard(id) {
+    setCards(prev => prev.filter(c => c.id !== id));
+    setSelectedCard(null);
+    setShowDeleteConfirm(false);
+    setScreen('list');
+  }
+
+  function exportCSV() {
+    const header = '이름,카테고리,등급,구매일,구매가(원),판매처,메모,등록일';
+    const rows = cards.map(c => {
+      const cat = CATEGORIES.find(x => x.value === c.category);
+      return [c.name, cat ? cat.label : c.category, c.grade || '', c.purchaseDate || '', c.price || '', c.seller || '', (c.memo || '').replace(/,/g, ' '), new Date(c.createdAt).toLocaleDateString('ko-KR')].join(',');
+    });
+    const csv = '\uFEFF' + header + '\n' + rows.join('\n');
+    downloadFile(csv, 'tcg_collection.csv', 'text/csv;charset=utf-8');
+  }
+  function exportJSON() {
+    const data = cards.map(c => {
+      const { photo, ...rest } = c; // exclude base64 photo from JSON export
+      return rest;
+    });
+    downloadFile(JSON.stringify(data, null, 2), 'tcg_collection.json', 'application/json');
+  }
+  function downloadFile(content, filename, type) {
+    const blob = new Blob([content], { type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+    setShowExport(false);
+  }
+
+  function importJSON(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        if (Array.isArray(data)) {
+          const newCards = data.filter(d => d.name && d.category);
+          if (newCards.length > 0) {
+            setCards(prev => {
+              const existIds = new Set(prev.map(c => c.id));
+              const toAdd = newCards.filter(c => !existIds.has(c.id));
+              return [...prev, ...toAdd];
+            });
+            alert(`${newCards.length}건 중 새로운 카드를 가져왔습니다.`);
+          }
+        }
+      } catch { alert('올바른 JSON 파일이 아닙니다.'); }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+    setShowExport(false);
+  }
+
+  // ─── Screens ───
+  if (screen === 'add') return <CardForm onSave={addCard} onCancel={() => setScreen('list')} />;
+  if (screen === 'edit' && editCard) return <CardForm card={editCard} onSave={updateCard} onCancel={() => { setScreen('detail'); setEditCard(null); }} />;
+  if (screen === 'detail' && selectedCard) {
+    const cat = CATEGORIES.find(x => x.value === selectedCard.category);
+    return (
+      <div style={{ maxWidth: 500, margin: '0 auto', padding: 16 }}>
+        <button onClick={() => { setScreen('list'); setSelectedCard(null); }} className="text-gray-400 mb-4" style={{ background: 'none', border: 'none', fontSize: 15, cursor: 'pointer' }}>← 목록으로</button>
+
+        {selectedCard.photo ? (
+          <img src={selectedCard.photo} alt={selectedCard.name} style={{ width: '100%', maxHeight: 400, objectFit: 'contain', borderRadius: 12, background: '#334155', marginBottom: 16 }} />
+        ) : (
+          <div style={{ width: '100%', height: 250, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, #334155, #1e293b)', borderRadius: 12, fontSize: 80, marginBottom: 16 }}>
+            {cat ? cat.emoji : '🎴'}
+          </div>
+        )}
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <span className={`badge ${cat ? cat.badge : 'badge-other'}`}>{cat ? cat.label : selectedCard.category}</span>
+          {selectedCard.grade && <span className="badge" style={{ background: '#475569' }}>{selectedCard.grade}</span>}
+        </div>
+
+        <h1 style={{ fontSize: 22, fontWeight: 700, marginBottom: 16 }}>{selectedCard.name}</h1>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 }}>
+          <div className="stat-card">
+            <div style={{ fontSize: 12, color: '#94a3b8' }}>구매가</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: '#6366f1' }}>{formatPrice(selectedCard.price)}</div>
+          </div>
+          <div className="stat-card">
+            <div style={{ fontSize: 12, color: '#94a3b8' }}>구매일</div>
+            <div style={{ fontSize: 18, fontWeight: 700 }}>{formatDate(selectedCard.purchaseDate)}</div>
+          </div>
+        </div>
+
+        {selectedCard.seller && (
+          <div style={{ marginBottom: 8 }}>
+            <span style={{ color: '#94a3b8', fontSize: 13 }}>구매처: </span>
+            <span>{selectedCard.seller}</span>
+          </div>
+        )}
+        {selectedCard.memo && (
+          <div style={{ marginBottom: 16, padding: 12, background: '#0f172a', borderRadius: 8, fontSize: 14, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
+            {selectedCard.memo}
+          </div>
+        )}
+        <div style={{ fontSize: 12, color: '#475569', marginBottom: 16 }}>
+          등록: {new Date(selectedCard.createdAt).toLocaleDateString('ko-KR')}
+        </div>
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn btn-primary" style={{ flex: 1 }} onClick={() => { setEditCard(selectedCard); setScreen('edit'); }}>✏️ 수정</button>
+          <button className="btn btn-danger" onClick={() => setShowDeleteConfirm(true)}>🗑️</button>
+        </div>
+
+        {showDeleteConfirm && (
+          <div className="modal-overlay" onClick={() => setShowDeleteConfirm(false)}>
+            <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: 340, textAlign: 'center' }}>
+              <p style={{ fontSize: 16, marginBottom: 20 }}>'{selectedCard.name}'을(를) 삭제하시겠습니까?</p>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="btn btn-outline" style={{ flex: 1 }} onClick={() => setShowDeleteConfirm(false)}>취소</button>
+                <button className="btn btn-danger" style={{ flex: 1 }} onClick={() => deleteCard(selectedCard.id)}>삭제</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ─── List Screen ───
+  return (
+    <div style={{ maxWidth: 640, margin: '0 auto', padding: 16, paddingBottom: 80 }}>
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <h1 style={{ fontSize: 22, fontWeight: 800 }}>🃏 My TCG</h1>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn btn-outline" style={{ padding: '8px 12px', fontSize: 13 }} onClick={() => setShowExport(true)}>📁</button>
+          <button className="btn btn-primary" style={{ padding: '8px 16px' }} onClick={() => setScreen('add')}>+ 등록</button>
+        </div>
+      </div>
+
+      {/* Stats */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 16 }}>
+        <div className="stat-card">
+          <div style={{ fontSize: 11, color: '#94a3b8' }}>전체</div>
+          <div style={{ fontSize: 20, fontWeight: 800 }}>{stats.total}</div>
+        </div>
+        <div className="stat-card">
+          <div style={{ fontSize: 11, color: '#94a3b8' }}>총 투자</div>
+          <div style={{ fontSize: 16, fontWeight: 800, color: '#6366f1' }}>{stats.totalSpent > 0 ? (stats.totalSpent >= 10000 ? Math.floor(stats.totalSpent / 10000).toLocaleString() + '만' : stats.totalSpent.toLocaleString()) + '원' : '-'}</div>
+        </div>
+        <div className="stat-card">
+          <div style={{ fontSize: 11, color: '#94a3b8' }}>평균 단가</div>
+          <div style={{ fontSize: 16, fontWeight: 800 }}>{stats.total > 0 && stats.totalSpent > 0 ? formatPrice(Math.round(stats.totalSpent / stats.total)) : '-'}</div>
+        </div>
+      </div>
+
+      {/* Category Filter */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 12, overflowX: 'auto' }}>
+        <button onClick={() => setFilter('all')} className={`btn ${filter === 'all' ? 'btn-primary' : 'btn-outline'}`} style={{ padding: '6px 14px', fontSize: 13, whiteSpace: 'nowrap' }}>
+          전체 {stats.total}
+        </button>
+        {CATEGORIES.map(cat => (
+          <button key={cat.value} onClick={() => setFilter(cat.value)} className={`btn ${filter === cat.value ? 'btn-primary' : 'btn-outline'}`} style={{ padding: '6px 14px', fontSize: 13, whiteSpace: 'nowrap' }}>
+            {cat.emoji} {cat.label} {stats.byCat[cat.value] || 0}
+          </button>
+        ))}
+      </div>
+
+      {/* Search & Sort */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+        <input type="text" placeholder="🔍 카드명, 메모, 판매처 검색..." value={search} onChange={e => setSearch(e.target.value)} style={{ flex: 1 }} />
+        <select value={sort} onChange={e => setSort(e.target.value)} style={{ width: 130, fontSize: 13 }}>
+          {SORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </div>
+
+      {/* Card Grid */}
+      {filtered.length === 0 ? (
+        <div className="empty-state">
+          <div style={{ fontSize: 64, marginBottom: 16 }}>🃏</div>
+          <p style={{ fontSize: 16 }}>{cards.length === 0 ? '아직 등록된 카드가 없어요' : '검색 결과가 없습니다'}</p>
+          {cards.length === 0 && <p style={{ fontSize: 13, marginTop: 8 }}>상단의 '+ 등록' 버튼으로 첫 카드를 추가해보세요!</p>}
+        </div>
+      ) : (
+        <div className="card-grid">
+          {filtered.map(card => {
+            const cat = CATEGORIES.find(x => x.value === card.category);
+            return (
+              <div key={card.id} className="card-item" onClick={() => { setSelectedCard(card); setScreen('detail'); }}>
+                {card.photo ? (
+                  <img src={card.photo} alt={card.name} className="card-img" />
+                ) : (
+                  <div className="card-noimg">{cat ? cat.emoji : '🎴'}</div>
+                )}
+                <div style={{ padding: '8px 10px' }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{card.name}</div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span className={`badge ${cat ? cat.badge : 'badge-other'}`} style={{ fontSize: 10 }}>{cat ? cat.label : '기타'}</span>
+                    <span style={{ fontSize: 12, color: '#6366f1', fontWeight: 600 }}>{card.price ? formatPrice(card.price) : ''}</span>
+                  </div>
+                  {card.grade && <div style={{ fontSize: 10, color: '#64748b', marginTop: 2 }}>{card.grade}</div>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Export Modal */}
+      {showExport && (
+        <div className="modal-overlay" onClick={() => setShowExport(false)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()} style={{ maxWidth: 360 }}>
+            <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 16 }}>📁 내보내기 / 가져오기</h2>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <button className="btn btn-primary" onClick={exportCSV} style={{ width: '100%' }}>📊 CSV 다운로드 (엑셀)</button>
+              <button className="btn btn-outline" onClick={exportJSON} style={{ width: '100%' }}>📋 JSON 다운로드</button>
+              <div style={{ borderTop: '1px solid #334155', paddingTop: 10 }}>
+                <label style={{ fontSize: 13, color: '#94a3b8', display: 'block', marginBottom: 6 }}>JSON 가져오기 (기존 데이터에 추가)</label>
+                <input type="file" accept=".json" onChange={importJSON} />
+              </div>
+              <button className="btn btn-outline" onClick={() => setShowExport(false)} style={{ width: '100%', marginTop: 4 }}>닫기</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CardForm({ card, onSave, onCancel }) {
+  const [name, setName] = useState(card?.name || '');
+  const [category, setCategory] = useState(card?.category || 'pokemon');
+  const [grade, setGrade] = useState(card?.grade || '');
+  const [purchaseDate, setPurchaseDate] = useState(card?.purchaseDate || new Date().toISOString().slice(0, 10));
+  const [price, setPrice] = useState(card?.price?.toString() || '');
+  const [seller, setSeller] = useState(card?.seller || '');
+  const [memo, setMemo] = useState(card?.memo || '');
+  const [photo, setPhoto] = useState(card?.photo || '');
+  const fileRef = useRef(null);
+
+  function handlePhoto(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) { alert('5MB 이하의 이미지만 가능합니다.'); return; }
+    const reader = new FileReader();
+    reader.onload = (ev) => setPhoto(ev.target.result);
+    reader.readAsDataURL(file);
+  }
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    if (!name.trim()) { alert('카드 이름을 입력해주세요.'); return; }
+    const data = {
+      ...(card || {}),
+      name: name.trim(),
+      category,
+      grade,
+      purchaseDate,
+      price: price ? parseInt(price.replace(/[^0-9]/g, '')) : 0,
+      seller: seller.trim(),
+      memo: memo.trim(),
+      photo,
+    };
+    onSave(data);
+  }
+
+  function handlePriceInput(val) {
+    const num = val.replace(/[^0-9]/g, '');
+    setPrice(num);
+  }
+
+  return (
+    <div style={{ maxWidth: 500, margin: '0 auto', padding: 16 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+        <button onClick={onCancel} className="text-gray-400" style={{ background: 'none', border: 'none', fontSize: 15, cursor: 'pointer', color: '#94a3b8' }}>← 취소</button>
+        <h2 style={{ fontSize: 18, fontWeight: 700 }}>{card ? '카드 수정' : '카드 등록'}</h2>
+        <div style={{ width: 50 }}></div>
+      </div>
+
+      <form onSubmit={handleSubmit}>
+        {/* Photo */}
+        <div style={{ marginBottom: 16, textAlign: 'center' }}>
+          {photo ? (
+            <div style={{ position: 'relative', display: 'inline-block' }}>
+              <img src={photo} alt="preview" style={{ maxHeight: 200, borderRadius: 12 }} />
+              <button type="button" onClick={() => setPhoto('')} style={{ position: 'absolute', top: 4, right: 4, background: 'rgba(0,0,0,0.6)', color: 'white', border: 'none', borderRadius: '50%', width: 28, height: 28, cursor: 'pointer', fontSize: 14 }}>✕</button>
+            </div>
+          ) : (
+            <div onClick={() => fileRef.current?.click()} style={{ background: '#1e293b', border: '2px dashed #334155', borderRadius: 12, padding: '30px 20px', cursor: 'pointer' }}>
+              <div style={{ fontSize: 36, marginBottom: 8 }}>📷</div>
+              <div style={{ fontSize: 13, color: '#64748b' }}>탭하여 사진 추가</div>
+            </div>
+          )}
+          <input ref={fileRef} type="file" accept="image/*" onChange={handlePhoto} style={{ display: 'none' }} />
+        </div>
+
+        {/* Name */}
+        <div style={{ marginBottom: 12 }}>
+          <label style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, display: 'block' }}>카드 이름 *</label>
+          <input type="text" value={name} onChange={e => setName(e.target.value)} placeholder="예: 리자몽 VMAX HR" autoFocus />
+        </div>
+
+        {/* Category */}
+        <div style={{ marginBottom: 12 }}>
+          <label style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, display: 'block' }}>카테고리</label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {CATEGORIES.map(cat => (
+              <button key={cat.value} type="button" onClick={() => setCategory(cat.value)}
+                style={{ flex: 1, padding: '10px 4px', borderRadius: 8, border: category === cat.value ? '2px solid #6366f1' : '1px solid #334155', background: category === cat.value ? 'rgba(99,102,241,0.15)' : '#1e293b', cursor: 'pointer', textAlign: 'center', fontSize: 13, color: '#e2e8f0' }}>
+                {cat.emoji}<br/><span style={{ fontSize: 11 }}>{cat.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Grade */}
+        <div style={{ marginBottom: 12 }}>
+          <label style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, display: 'block' }}>등급</label>
+          <select value={grade} onChange={e => setGrade(e.target.value)}>
+            <option value="">선택 안 함</option>
+            {GRADES.filter(g => g).map(g => <option key={g} value={g}>{g}</option>)}
+          </select>
+        </div>
+
+        {/* Date & Price */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 12 }}>
+          <div>
+            <label style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, display: 'block' }}>구매일</label>
+            <input type="date" value={purchaseDate} onChange={e => setPurchaseDate(e.target.value)} />
+          </div>
+          <div>
+            <label style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, display: 'block' }}>구매가 (원)</label>
+            <input type="text" inputMode="numeric" value={price ? Number(price).toLocaleString('ko-KR') : ''} onChange={e => handlePriceInput(e.target.value)} placeholder="0" />
+          </div>
+        </div>
+
+        {/* Seller */}
+        <div style={{ marginBottom: 12 }}>
+          <label style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, display: 'block' }}>구매처</label>
+          <input type="text" value={seller} onChange={e => setSeller(e.target.value)} placeholder="예: 번개장터, 카드샵, 해외직구..." />
+        </div>
+
+        {/* Memo */}
+        <div style={{ marginBottom: 20 }}>
+          <label style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, display: 'block' }}>메모</label>
+          <textarea value={memo} onChange={e => setMemo(e.target.value)} placeholder="특이사항, 컨디션 등..." rows={3} style={{ resize: 'vertical' }} />
+        </div>
+
+        <button type="submit" className="btn btn-primary" style={{ width: '100%', padding: 14, fontSize: 16 }}>
+          {card ? '✏️ 수정 완료' : '✅ 등록하기'}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
