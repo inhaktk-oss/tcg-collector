@@ -241,17 +241,7 @@ function App() {
     } finally { syncingRef.current = false; }
   }
 
-  // Auto-pull DISABLED: only manual sync to prevent overwriting local data
-  // Auto-push after local card changes (2s debounce) — safe, user's action triggers it
-  const prevCardsJSON = useRef('');
-  useEffect(() => {
-    const json = JSON.stringify(cards.map(({ photo, syncPhoto, ...r }) => r));
-    if (prevCardsJSON.current && json !== prevCardsJSON.current) {
-      if (syncTimer.current) clearTimeout(syncTimer.current);
-      syncTimer.current = setTimeout(() => pushToGist(), 2000);
-    }
-    prevCardsJSON.current = json;
-  }, [cards]);
+  // ALL auto-sync DISABLED — manual only via sync screen buttons
 
   // Manual sync: pull first, then push if local has newer changes
   async function doSync() {
