@@ -804,13 +804,16 @@ async function ocrCardName(photoDataUrl) {
   }
 }
 
-// ─── Photo Cropper (adjustable ratio) ───
+// ─── Photo Cropper (resizable crop frame) ───
 const CROP_RATIOS = [
   { label: '세로', icon: '▯', ratio: 63 / 88 },
   { label: '가로', icon: '▭', ratio: 88 / 63 },
   { label: '정방', icon: '⬜', ratio: 1 },
   { label: '자유', icon: '⊡', ratio: 0 },
 ];
+const MIN_CROP = 50; // minimum crop box size
+const HANDLE_SIZE = 22; // touch-friendly handle hit area
+
 function PhotoCropper({ src, onCrop, onCancel }) {
   const [ratioIdx, setRatioIdx] = useState(0);
   const RATIO = CROP_RATIOS[ratioIdx].ratio;
@@ -819,13 +822,13 @@ function PhotoCropper({ src, onCrop, onCancel }) {
   const [imgLoaded, setImgLoaded] = useState(false);
   const [scale, setScale] = useState(1);
   const [pos, setPos] = useState({ x: 0, y: 0 });
-  const dragRef = useRef({ dragging: false, startX: 0, startY: 0, origX: 0, origY: 0 });
   const [cropBox, setCropBox] = useState({ x: 0, y: 0, w: 0, h: 0 });
 
-  function recalcBox(rIdx) {
-    if (!containerRef.current) return;
-    const cw = containerRef.current.clientWidth;
-    const ch = containerRef.current.clientHeight;
+  // Interaction state: 'none' | 'pan' (move image) | 'move' (move crop box) | 'resize-XX'
+  const interRef = useRef({ type: 'none', startX: 0, startY: 0, origBox: null, origPos: null });
+  const pinchRef = useRef({ active: false, startDist: 0, startScale: 1 });
+
+  function initCropBox(rIdx, cw, ch) {
     const r = CROP_RATIOS[rIdx].ratio;
     let boxW, boxH;
     if (r === 0) {
@@ -837,38 +840,30 @@ function PhotoCropper({ src, onCrop, onCancel }) {
       boxH = Math.min(ch * 0.85, (cw * 0.7) / r);
       boxW = boxH * r;
     }
-    setCropBox({ x: (cw - boxW) / 2, y: (ch - boxH) / 2, w: boxW, h: boxH });
-  }
-
-  function centerImage(s, cw, ch) {
-    const img = imgRef.current;
-    if (!img) return { x: 0, y: 0 };
-    const iw = img.naturalWidth, ih = img.naturalHeight;
-    return { x: (cw - iw * s) / 2, y: (ch - ih * s) / 2 };
+    return { x: (cw - boxW) / 2, y: (ch - boxH) / 2, w: boxW, h: boxH };
   }
 
   useEffect(() => {
     if (!imgLoaded || !containerRef.current) return;
     requestAnimationFrame(() => {
       if (!containerRef.current) return;
-      recalcBox(ratioIdx);
       const cw = containerRef.current.clientWidth;
       const ch = containerRef.current.clientHeight;
+      setCropBox(initCropBox(ratioIdx, cw, ch));
       const img = imgRef.current;
       const iw = img.naturalWidth, ih = img.naturalHeight;
       const fitScale = Math.max((cw * 0.7) / iw, (ch * 0.7) / ih) * 1.05;
       setScale(fitScale);
-      setPos(centerImage(fitScale, cw, ch));
+      setPos({ x: (cw - iw * fitScale) / 2, y: (ch - ih * fitScale) / 2 });
     });
   }, [imgLoaded]);
 
   function switchRatio(newIdx) {
     setRatioIdx(newIdx);
-    recalcBox(newIdx);
-    if (containerRef.current && imgRef.current) {
+    if (containerRef.current) {
       const cw = containerRef.current.clientWidth;
       const ch = containerRef.current.clientHeight;
-      setPos(centerImage(scale, cw, ch));
+      setCropBox(initCropBox(newIdx, cw, ch));
     }
   }
 
@@ -887,43 +882,121 @@ function PhotoCropper({ src, onCrop, onCancel }) {
     zoomAtCenter(scale - e.deltaY * 0.001);
   }
 
-  function startDrag(cx, cy) {
-    dragRef.current = { dragging: true, startX: cx, startY: cy, origX: pos.x, origY: pos.y };
-  }
-  function moveDrag(cx, cy) {
-    if (!dragRef.current.dragging) return;
-    const d = dragRef.current;
-    setPos({ x: d.origX + (cx - d.startX), y: d.origY + (cy - d.startY) });
-  }
-  function endDrag() { dragRef.current.dragging = false; }
+  // Detect which handle/zone the pointer hits
+  function detectZone(cx, cy) {
+    const b = cropBox;
+    const H = HANDLE_SIZE;
+    const inX = cx >= b.x - H && cx <= b.x + b.w + H;
+    const inY = cy >= b.y - H && cy <= b.y + b.h + H;
+    if (!inX || !inY) return 'pan';
 
-  const pinchRef = useRef({ active: false, startDist: 0, startScale: 1 });
+    const nearL = Math.abs(cx - b.x) < H;
+    const nearR = Math.abs(cx - (b.x + b.w)) < H;
+    const nearT = Math.abs(cy - b.y) < H;
+    const nearB = Math.abs(cy - (b.y + b.h)) < H;
+
+    if (nearT && nearL) return 'resize-tl';
+    if (nearT && nearR) return 'resize-tr';
+    if (nearB && nearL) return 'resize-bl';
+    if (nearB && nearR) return 'resize-br';
+    if (nearT) return 'resize-t';
+    if (nearB) return 'resize-b';
+    if (nearL) return 'resize-l';
+    if (nearR) return 'resize-r';
+
+    if (cx >= b.x && cx <= b.x + b.w && cy >= b.y && cy <= b.y + b.h) return 'move';
+    return 'pan';
+  }
+
+  function clampBox(box) {
+    if (!containerRef.current) return box;
+    const cw = containerRef.current.clientWidth;
+    const ch = containerRef.current.clientHeight;
+    let { x, y, w, h } = box;
+    w = Math.max(MIN_CROP, w);
+    h = Math.max(MIN_CROP, h);
+    x = Math.max(0, Math.min(cw - w, x));
+    y = Math.max(0, Math.min(ch - h, y));
+    return { x, y, w, h };
+  }
+
+  function applyResize(zone, dx, dy, orig) {
+    let { x, y, w, h } = orig;
+    const r = RATIO;
+    switch (zone) {
+      case 'resize-br': w += dx; h += dy; break;
+      case 'resize-bl': x += dx; w -= dx; h += dy; break;
+      case 'resize-tr': w += dx; y += dy; h -= dy; break;
+      case 'resize-tl': x += dx; w -= dx; y += dy; h -= dy; break;
+      case 'resize-r': w += dx; break;
+      case 'resize-l': x += dx; w -= dx; break;
+      case 'resize-b': h += dy; break;
+      case 'resize-t': y += dy; h -= dy; break;
+    }
+    if (w < MIN_CROP) { if (zone.includes('l')) x -= (MIN_CROP - w); w = MIN_CROP; }
+    if (h < MIN_CROP) { if (zone.includes('t')) y -= (MIN_CROP - h); h = MIN_CROP; }
+    // Enforce aspect ratio if locked
+    if (r > 0) {
+      if (zone.includes('r') || zone.includes('l')) {
+        h = w / r;
+        if (zone.includes('t')) y = orig.y + orig.h - h;
+      } else {
+        w = h * r;
+        if (zone.includes('l')) x = orig.x + orig.w - w;
+      }
+    }
+    return clampBox({ x, y, w, h });
+  }
+
+  function startInteraction(cx, cy) {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const lx = cx - rect.left, ly = cy - rect.top;
+    const zone = detectZone(lx, ly);
+    interRef.current = { type: zone, startX: cx, startY: cy, origBox: { ...cropBox }, origPos: { ...pos } };
+  }
+
+  function moveInteraction(cx, cy) {
+    const inter = interRef.current;
+    if (inter.type === 'none') return;
+    const dx = cx - inter.startX;
+    const dy = cy - inter.startY;
+    if (inter.type === 'pan') {
+      setPos({ x: inter.origPos.x + dx, y: inter.origPos.y + dy });
+    } else if (inter.type === 'move') {
+      setCropBox(clampBox({ ...inter.origBox, x: inter.origBox.x + dx, y: inter.origBox.y + dy }));
+    } else if (inter.type.startsWith('resize-')) {
+      setCropBox(applyResize(inter.type, dx, dy, inter.origBox));
+    }
+  }
+
+  function endInteraction() { interRef.current = { type: 'none', startX: 0, startY: 0, origBox: null, origPos: null }; }
+
   function getTouchDist(t) { return Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY); }
 
-  function handleMouseDown(e) { e.preventDefault(); startDrag(e.clientX, e.clientY); }
-  function handleMouseMove(e) { moveDrag(e.clientX, e.clientY); }
-  function handleMouseUp() { endDrag(); }
+  function handleMouseDown(e) { e.preventDefault(); startInteraction(e.clientX, e.clientY); }
+  function handleMouseMove(e) { moveInteraction(e.clientX, e.clientY); }
+  function handleMouseUp() { endInteraction(); }
   function handleTouchStart(e) {
     if (e.touches.length === 2) {
       pinchRef.current = { active: true, startDist: getTouchDist(e.touches), startScale: scale };
-      endDrag();
+      endInteraction();
     } else if (e.touches.length === 1 && !pinchRef.current.active) {
-      startDrag(e.touches[0].clientX, e.touches[0].clientY);
+      startInteraction(e.touches[0].clientX, e.touches[0].clientY);
     }
   }
   function handleTouchMove(e) {
     e.preventDefault();
     if (e.touches.length === 2 && pinchRef.current.active) {
       const dist = getTouchDist(e.touches);
-      const newScale = pinchRef.current.startScale * (dist / pinchRef.current.startDist);
-      zoomAtCenter(newScale);
+      zoomAtCenter(pinchRef.current.startScale * (dist / pinchRef.current.startDist));
     } else if (e.touches.length === 1 && !pinchRef.current.active) {
-      moveDrag(e.touches[0].clientX, e.touches[0].clientY);
+      moveInteraction(e.touches[0].clientX, e.touches[0].clientY);
     }
   }
   function handleTouchEnd(e) {
     if (e.touches.length < 2) pinchRef.current.active = false;
-    if (e.touches.length === 0) endDrag();
+    if (e.touches.length === 0) endInteraction();
   }
 
   function doCrop() {
@@ -933,15 +1006,18 @@ function PhotoCropper({ src, onCrop, onCancel }) {
     const sy = (cropBox.y - pos.y) / scale;
     const sw = cropBox.w / scale;
     const sh = cropBox.h / scale;
-    const curRatio = RATIO || (cropBox.w / cropBox.h);
-
     const outW = Math.min(800, Math.round(sw));
-    const outH = Math.round(outW / curRatio);
+    const outH = Math.round(outW / (cropBox.w / cropBox.h));
     const canvas = document.createElement('canvas');
     canvas.width = outW; canvas.height = outH;
     const ctx = canvas.getContext('2d');
     ctx.drawImage(img, sx, sy, sw, sh, 0, 0, outW, outH);
     onCrop(canvas.toDataURL('image/jpeg', 0.85));
+  }
+
+  // Corner/edge handle dots
+  function Handle({ x, y, cursor }) {
+    return <div style={{ position: 'absolute', left: x - 8, top: y - 8, width: 16, height: 16, borderRadius: 4, background: 'rgba(99,102,241,0.9)', border: '2px solid white', pointerEvents: 'none', cursor }} />;
   }
 
   return (
@@ -959,14 +1035,15 @@ function PhotoCropper({ src, onCrop, onCancel }) {
           </button>
         ))}
       </div>
-      <div style={{ padding: '4px 16px 8px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8 }}>
+      <div style={{ padding: '4px 16px 4px', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8 }}>
         <button onClick={() => zoomAtCenter(scale - 0.1)} style={{ background: '#334155', border: 'none', color: 'white', width: 36, height: 36, borderRadius: 8, fontSize: 18, cursor: 'pointer', fontWeight: 700 }}>−</button>
-        <button onClick={() => zoomAtCenter(scale - 0.02)} style={{ background: '#334155', border: 'none', color: '#94a3b8', width: 30, height: 30, borderRadius: 6, fontSize: 13, cursor: 'pointer' }}>−</button>
         <span style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 600, minWidth: 48, textAlign: 'center' }}>{Math.round(scale * 100)}%</span>
-        <button onClick={() => zoomAtCenter(scale + 0.02)} style={{ background: '#334155', border: 'none', color: '#94a3b8', width: 30, height: 30, borderRadius: 6, fontSize: 13, cursor: 'pointer' }}>+</button>
         <button onClick={() => zoomAtCenter(scale + 0.1)} style={{ background: '#334155', border: 'none', color: 'white', width: 36, height: 36, borderRadius: 8, fontSize: 18, cursor: 'pointer', fontWeight: 700 }}>+</button>
       </div>
-      <div ref={containerRef} style={{ flex: 1, position: 'relative', overflow: 'hidden', touchAction: 'none', cursor: 'grab' }}
+      <div style={{ padding: '0 16px 6px', textAlign: 'center' }}>
+        <span style={{ fontSize: 11, color: '#64748b' }}>🔲 프레임: 모서리/변 드래그로 크기 조절 · 안쪽 드래그로 이동 · 바깥 드래그로 사진 이동</span>
+      </div>
+      <div ref={containerRef} style={{ flex: 1, position: 'relative', overflow: 'hidden', touchAction: 'none', cursor: 'crosshair' }}
         onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}
         onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd}
         onWheel={handleWheel}>
@@ -974,11 +1051,24 @@ function PhotoCropper({ src, onCrop, onCancel }) {
           style={{ position: 'absolute', left: pos.x, top: pos.y, width: imgRef.current ? imgRef.current.naturalWidth * scale : 'auto', height: imgRef.current ? imgRef.current.naturalHeight * scale : 'auto', pointerEvents: 'none', userSelect: 'none' }} draggable={false} />
         {imgLoaded && <>
           <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.6)', clipPath: `polygon(0 0, 100% 0, 100% 100%, 0 100%, 0 0, ${cropBox.x}px ${cropBox.y}px, ${cropBox.x}px ${cropBox.y + cropBox.h}px, ${cropBox.x + cropBox.w}px ${cropBox.y + cropBox.h}px, ${cropBox.x + cropBox.w}px ${cropBox.y}px, ${cropBox.x}px ${cropBox.y}px)`, pointerEvents: 'none' }} />
-          <div style={{ position: 'absolute', left: cropBox.x, top: cropBox.y, width: cropBox.w, height: cropBox.h, border: '2px solid rgba(255,255,255,0.8)', borderRadius: 8, pointerEvents: 'none', boxShadow: '0 0 0 1px rgba(0,0,0,0.3)' }}>
+          <div style={{ position: 'absolute', left: cropBox.x, top: cropBox.y, width: cropBox.w, height: cropBox.h, border: '2px solid rgba(255,255,255,0.8)', borderRadius: 4, pointerEvents: 'none', boxShadow: '0 0 0 1px rgba(0,0,0,0.3)' }}>
             <div style={{ position: 'absolute', top: '33.3%', left: 0, right: 0, borderTop: '1px solid rgba(255,255,255,0.2)' }} />
             <div style={{ position: 'absolute', top: '66.6%', left: 0, right: 0, borderTop: '1px solid rgba(255,255,255,0.2)' }} />
             <div style={{ position: 'absolute', left: '33.3%', top: 0, bottom: 0, borderLeft: '1px solid rgba(255,255,255,0.2)' }} />
             <div style={{ position: 'absolute', left: '66.6%', top: 0, bottom: 0, borderLeft: '1px solid rgba(255,255,255,0.2)' }} />
+          </div>
+          {/* Resize handles: 4 corners + 4 edges */}
+          <Handle x={cropBox.x} y={cropBox.y} cursor="nw-resize" />
+          <Handle x={cropBox.x + cropBox.w} y={cropBox.y} cursor="ne-resize" />
+          <Handle x={cropBox.x} y={cropBox.y + cropBox.h} cursor="sw-resize" />
+          <Handle x={cropBox.x + cropBox.w} y={cropBox.y + cropBox.h} cursor="se-resize" />
+          <Handle x={cropBox.x + cropBox.w / 2} y={cropBox.y} cursor="n-resize" />
+          <Handle x={cropBox.x + cropBox.w / 2} y={cropBox.y + cropBox.h} cursor="s-resize" />
+          <Handle x={cropBox.x} y={cropBox.y + cropBox.h / 2} cursor="w-resize" />
+          <Handle x={cropBox.x + cropBox.w} y={cropBox.y + cropBox.h / 2} cursor="e-resize" />
+          {/* Size indicator */}
+          <div style={{ position: 'absolute', left: cropBox.x + cropBox.w / 2, top: cropBox.y + cropBox.h + 12, transform: 'translateX(-50%)', background: 'rgba(0,0,0,0.7)', color: '#94a3b8', padding: '2px 8px', borderRadius: 4, fontSize: 10, pointerEvents: 'none', whiteSpace: 'nowrap' }}>
+            {Math.round(cropBox.w / scale)} × {Math.round(cropBox.h / scale)}px
           </div>
         </>}
       </div>
