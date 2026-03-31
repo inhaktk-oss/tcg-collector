@@ -893,14 +893,23 @@ function SyncScreen({ onBack, onSync }) {
     if (!cfg.token.trim()) { alert('GitHub 토큰을 입력해주세요.'); return; }
     setStatus('연결 중...');
     try {
-      const existing = await findGist(cfg.token.trim());
-      const gistId = existing ? existing.id : null;
-      const newCfg = { token: cfg.token.trim(), gistId };
+      const token = cfg.token.trim();
+      const existing = await findGist(token);
+      let gistId = existing ? existing.id : null;
+      if (!gistId) {
+        // Create new gist
+        const created = await createGist(token, { cards: [], lastSync: Date.now() });
+        gistId = created.id;
+      }
+      const newCfg = { token, gistId };
       saveSyncConfig(newCfg);
       setCfg(newCfg);
-      setStatus(gistId ? '기존 데이터 발견! 동기화하세요.' : '새로 시작합니다. 동기화하세요.');
+      setStatus('✅ 연결 성공! 동기화 중...');
+      // Auto-sync immediately
+      await onSync();
+      setStatus('✅ 동기화 완료!');
     } catch(e) {
-      setStatus('토큰이 올바르지 않습니다.');
+      setStatus('❌ 토큰이 올바르지 않거나 네트워크 오류입니다.');
     }
   }
 
@@ -929,13 +938,16 @@ function SyncScreen({ onBack, onSync }) {
           {cfg.token && <button className="btn btn-outline" onClick={handleDisconnect}>해제</button>}
         </div>
         
-        {status && <p style={{ fontSize: 13, marginTop: 8, color: status.includes('올바르지') ? '#ef4444' : '#34d399' }}>{status}</p>}
+        {status && <p style={{ fontSize: 13, marginTop: 8, color: status.includes('❌') ? '#ef4444' : '#34d399' }}>{status}</p>}
       </div>
 
       {cfg.gistId && (
-        <button className="btn btn-primary" style={{ width: '100%', padding: 14, fontSize: 16 }} onClick={() => { onSync(); onBack(); }}>
-          🔄 지금 동기화
-        </button>
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 13, color: '#34d399', marginBottom: 8 }}>✅ Gist 연결됨 (ID: {cfg.gistId.slice(0, 8)}...)</div>
+          <button className="btn btn-primary" style={{ width: '100%', padding: 14, fontSize: 16 }} onClick={async () => { setStatus('동기화 중...'); await onSync(); setStatus('✅ 동기화 완료!'); }}>
+            🔄 지금 동기화
+          </button>
+        </div>
       )}
 
       <div style={{ marginTop: 20, padding: 12, background: '#0f172a', borderRadius: 8, fontSize: 12, color: '#64748b', lineHeight: 1.8 }}>
