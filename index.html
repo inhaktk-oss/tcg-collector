@@ -374,13 +374,35 @@ function parseBrgCertHtml(html) {
   return null;
 }
 
-// BRG JSON API (via CORS proxy)
+// BRG JSON API (via CORS proxy, retry with multiple proxies)
 async function fetchBrgCertApi(serial) {
   const apiUrl = 'https://gate.break.co.kr/brg/api/gradings/certification/' + serial;
+  const proxies = [
+    url => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
+    url => 'https://api.allorigins.win/get?url=' + encodeURIComponent(url),
+  ];
+  let rawText = null;
+  for (const mkUrl of proxies) {
+    for (let retry = 0; retry < 2; retry++) {
+      try {
+        const resp = await fetch(mkUrl(apiUrl), { signal: AbortSignal.timeout(12000) });
+        if (!resp.ok) continue;
+        const txt = await resp.text();
+        // /get wraps in {"contents":"..."} — unwrap
+        if (mkUrl === proxies[1]) {
+          try { rawText = JSON.parse(txt).contents; } catch { continue; }
+        } else {
+          rawText = txt;
+        }
+        if (rawText && rawText.startsWith('{')) break;
+        rawText = null;
+      } catch { /* timeout or network error, try next */ }
+    }
+    if (rawText) break;
+  }
+  if (!rawText) return null;
   try {
-    const resp = await fetch('https://api.allorigins.win/raw?url=' + encodeURIComponent(apiUrl));
-    if (!resp.ok) return null;
-    const json = await resp.json();
+    const json = JSON.parse(rawText);
     if (json.status !== 'success' || !json.data?.cardInfo) return null;
     const c = json.data.cardInfo;
     const info = {};
@@ -399,7 +421,7 @@ async function fetchBrgCertApi(serial) {
     if (c.sportsType) info.sportsType = c.sportsType;
     if (c.limitNumber) info.limitNumber = c.limitNumber;
     return info;
-  } catch(e) { return null; }
+  } catch { return null; }
 }
 
 function parseGenericCertHtml(html, company) {
