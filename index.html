@@ -193,7 +193,7 @@ const CATEGORIES = [
   { value: 'other', label: '기타', emoji: '🎴', badge: 'badge-other' },
 ];
 
-const GRADE_COMPANIES = ['PSA', 'BGS', 'SGC', 'CGC', 'BRG', '기타'];
+const GRADE_COMPANIES = ['PSA', 'BGS', 'SGC', 'CGC', '기타'];
 const GRADE_SCORES = [10, 9.5, 9, 8.5, 8, 7.5, 7, 6.5, 6, 5.5, 5, 4.5, 4, 3.5, 3, 2.5, 2, 1.5, 1, 0.5, 0];
 
 // ─── v32: Cert Lookup for Graded Cards ───
@@ -215,7 +215,7 @@ function getCertPageUrl(company, certNum) {
     case 'BGS': return `https://www.beckett.com/grading/card-lookup?serial_number=${n}`;
     case 'SGC': return `https://gosgc.com/card/${n}`;
     case 'CGC': return `https://www.cgccards.com/certlookup/${n}`;
-    case 'BRG': return `https://brgrading.com/card/${n}`;
+
     default: return null;
   }
 }
