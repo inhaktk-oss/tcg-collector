@@ -1667,6 +1667,7 @@ function CardForm({ card, onSave, onCancel }) {
                 <div style={{ fontSize: 11, color: '#64748b', marginBottom: 4 }}>📸 {gradeCompany} 인증 이미지 미리보기:</div>
                 <img src={getCertImageUrl(gradeCompany, certNumber)} alt="cert" onLoad={() => setCertImgOk(true)} onError={() => setCertImgOk(false)}
                   style={{ maxHeight: 180, borderRadius: 8, border: '1px solid #334155' }} />
+                {certImgOk && !photo && <div style={{ fontSize: 11, color: '#34d399', marginTop: 4 }}>✅ 인증 이미지 로드 완료</div>}
               </div>
             )}
             {certNumber.trim() && getCertPageUrl(gradeCompany, certNumber) && (
