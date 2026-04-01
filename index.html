@@ -195,6 +195,34 @@ const CATEGORIES = [
 
 const GRADE_COMPANIES = ['PSA', 'BGS', 'SGC', 'CGC', 'BRG', '기타'];
 const GRADE_SCORES = [10, 9.5, 9, 8.5, 8, 7.5, 7, 6.5, 6, 5.5, 5, 4.5, 4, 3.5, 3, 2.5, 2, 1.5, 1, 0.5, 0];
+
+// ─── v32: Cert Lookup for Graded Cards ───
+function getCertImageUrl(company, certNum) {
+  if (!certNum) return null;
+  const n = certNum.replace(/\D/g, '');
+  if (!n) return null;
+  switch (company) {
+    case 'PSA': return `https://d1htnxwo4o0jhw.cloudfront.net/cert/${n}/${n}_1.jpg`;
+    default: return null;
+  }
+}
+function getCertPageUrl(company, certNum) {
+  if (!certNum) return null;
+  const n = certNum.replace(/\D/g, '');
+  if (!n) return null;
+  switch (company) {
+    case 'PSA': return `https://www.psacard.com/cert/${n}`;
+    case 'BGS': return `https://www.beckett.com/grading/card-lookup?serial_number=${n}`;
+    case 'SGC': return `https://gosgc.com/card/${n}`;
+    case 'CGC': return `https://www.cgccards.com/certlookup/${n}`;
+    default: return null;
+  }
+}
+function getGradeCompanyFromGrade(grade) {
+  if (!grade) return '';
+  const match = grade.match(/^(\S+)/);
+  return match ? match[1] : '';
+}
 function parseGrade(grade) {
   if (!grade) return { company: '', score: '' };
   if (grade === 'RAW카드' || grade === 'Raw(미등급)') return { company: 'RAW카드', score: '' };
@@ -594,11 +622,11 @@ function App() {
   }
 
   function exportCSV() {
-    const header = '이름,카테고리,등급,상태,구매일,구매가(원),현재시세(원),판매가(원),판매일,판매처,메모,등록일';
+    const header = '이름,카테고리,등급,인증번호,상태,구매일,구매가(원),현재시세(원),판매가(원),판매일,판매처,메모,등록일';
     const rows = cards.map(c => {
       const cat = CATEGORIES.find(x => x.value === c.category);
       const st = CARD_STATUSES.find(s => s.value === (c.status || 'owned'));
-      return [c.name, cat ? cat.label : c.category, c.grade || '', st ? st.label : '보유', c.purchaseDate || '', c.price || 0, c.currentValue || 0, c.soldPrice || 0, c.soldDate || '', c.seller || '', (c.memo || '').replace(/,/g, ' '), new Date(c.createdAt).toLocaleDateString('ko-KR')].join(',');
+      return [c.name, cat ? cat.label : c.category, c.grade || '', c.certNumber || '', st ? st.label : '보유', c.purchaseDate || '', c.price || 0, c.currentValue || 0, c.soldPrice || 0, c.soldDate || '', c.seller || '', (c.memo || '').replace(/,/g, ' '), new Date(c.createdAt).toLocaleDateString('ko-KR')].join(',');
     });
     const csv = '\uFEFF' + header + '\n' + rows.join('\n');
     downloadFile(csv, 'tcg_collection.csv', 'text/csv;charset=utf-8');
@@ -658,6 +686,10 @@ function App() {
 
         {selectedCard.photo ? (
           <img src={selectedCard.photo} alt={selectedCard.name} style={{ width: '100%', maxHeight: 400, objectFit: 'contain', borderRadius: 12, background: '#334155', marginBottom: 16 }} />
+        ) : getCertImageUrl(getGradeCompanyFromGrade(selectedCard.grade), selectedCard.certNumber) ? (
+          <img src={getCertImageUrl(getGradeCompanyFromGrade(selectedCard.grade), selectedCard.certNumber)} alt={selectedCard.name}
+            style={{ width: '100%', maxHeight: 400, objectFit: 'contain', borderRadius: 12, background: '#334155', marginBottom: 16 }}
+            onError={e => { e.target.style.display='none'; }} />
         ) : (
           <div style={{ width: '100%', height: 250, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, #334155, #1e293b)', borderRadius: 12, fontSize: 80, marginBottom: 16 }}>
             {cat ? cat.emoji : '🎴'}
@@ -667,6 +699,7 @@ function App() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
           <span className={`badge ${cat ? cat.badge : 'badge-other'}`}>{cat ? cat.label : selectedCard.category}</span>
           {selectedCard.grade && <span className="badge" style={{ background: '#475569' }}>{selectedCard.grade}</span>}
+          {selectedCard.certNumber && <span className="badge" style={{ background: '#334155', fontSize: 10, fontFamily: 'monospace' }}>#{selectedCard.certNumber}</span>}
           {(() => { const st = CARD_STATUSES.find(s => s.value === (selectedCard.status || 'owned')); return st ? <span className={`badge badge-${st.value}`}>{st.emoji} {st.label}</span> : null; })()}
         </div>
 
@@ -697,6 +730,29 @@ function App() {
             </div>
           )}
         </div>
+
+        {/* v32: Cert Verification */}
+        {selectedCard.certNumber && (() => {
+          const gc = getGradeCompanyFromGrade(selectedCard.grade);
+          const certUrl = getCertPageUrl(gc, selectedCard.certNumber);
+          return certUrl ? (
+            <div style={{ background: '#0f172a', borderRadius: 10, padding: 12, marginBottom: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                <span style={{ fontSize: 13, color: '#94a3b8' }}>🏅 {gc} 인증 #{selectedCard.certNumber}</span>
+              </div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <button onClick={() => window.open(certUrl, '_blank')} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '6px 12px', borderRadius: 8, border: '1px solid rgba(99,102,241,0.4)', background: 'rgba(99,102,241,0.12)', color: '#a5b4fc', fontSize: 12, cursor: 'pointer', fontWeight: 600 }}>
+                  🔍 인증 조회 / POP
+                </button>
+                {gc === 'PSA' && (
+                  <button onClick={() => window.open(`https://www.psacard.com/pop`, '_blank')} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '6px 12px', borderRadius: 8, border: '1px solid rgba(251,191,36,0.4)', background: 'rgba(251,191,36,0.12)', color: '#fbbf24', fontSize: 12, cursor: 'pointer', fontWeight: 600 }}>
+                  📊 PSA POP Report
+                </button>
+                )}
+              </div>
+            </div>
+          ) : null;
+        })()}
 
         {/* Price Lookup */}
         <div style={{ background: '#0f172a', borderRadius: 10, padding: 12, marginBottom: 12 }}>
@@ -847,6 +903,8 @@ function App() {
                 {!batchMode && <button className="batch-check" onClick={e => { e.stopPropagation(); toggleCompare(card.id); }} style={{ background: compareIds.includes(card.id) ? '#f59e0b' : 'rgba(0,0,0,0.4)', border: '2px solid ' + (compareIds.includes(card.id) ? '#f59e0b' : 'rgba(255,255,255,0.3)'), borderRadius: 6, width: 22, height: 22, fontSize: 10, color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }} title="비교에 추가">{compareIds.includes(card.id) ? '⚖️' : '+'}</button>}
                 {card.photo ? (
                   <LazyImage src={card.photo} alt={card.name} className="card-img" />
+                ) : getCertImageUrl(getGradeCompanyFromGrade(card.grade), card.certNumber) ? (
+                  <LazyImage src={getCertImageUrl(getGradeCompanyFromGrade(card.grade), card.certNumber)} alt={card.name} className="card-img" />
                 ) : (
                   <div className="card-noimg">{cat ? cat.emoji : '🎴'}</div>
                 )}
@@ -1244,6 +1302,8 @@ function CardForm({ card, onSave, onCancel }) {
   const [cropSrc, setCropSrc] = useState(null);
   const [ocrStatus, setOcrStatus] = useState(''); // '', 'loading', 'done'
   const [ocrSuggestion, setOcrSuggestion] = useState('');
+  const [certNumber, setCertNumber] = useState(card?.certNumber || '');
+  const [certImgOk, setCertImgOk] = useState(false);
   const fileRef = useRef(null);
 
   async function handleCropDone(result) {
@@ -1287,6 +1347,7 @@ function CardForm({ card, onSave, onCancel }) {
       seller: seller.trim(),
       memo: memo.trim(),
       photo,
+      certNumber: certNumber.trim(),
     };
     onSave(data);
   }
@@ -1387,6 +1448,35 @@ function CardForm({ card, onSave, onCancel }) {
             )}
           </div>
         </div>
+
+        {/* v32: Cert Number */}
+        {gradeCompany && gradeCompany !== 'RAW카드' && gradeCompany !== '기타' && gradeCompany !== '' && (
+          <div className="form-field">
+            <label>🔢 인증번호 (시리얼넘버)</label>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input type="text" inputMode="numeric" value={certNumber} onChange={e => { setCertNumber(e.target.value); setCertImgOk(false); }} placeholder={`${gradeCompany} 인증번호 입력`} style={{ flex: 1 }} />
+              {certNumber.trim() && getCertPageUrl(gradeCompany, certNumber) && (
+                <button type="button" onClick={() => window.open(getCertPageUrl(gradeCompany, certNumber), '_blank')}
+                  style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #6366f1', background: 'rgba(99,102,241,0.15)', color: '#a5b4fc', fontSize: 13, cursor: 'pointer', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                  🔍 조회
+                </button>
+              )}
+            </div>
+            {certNumber.trim() && getCertImageUrl(gradeCompany, certNumber) && (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ fontSize: 11, color: '#64748b', marginBottom: 4 }}>📸 {gradeCompany} 인증 이미지 미리보기:</div>
+                <img src={getCertImageUrl(gradeCompany, certNumber)} alt="cert" onLoad={() => setCertImgOk(true)} onError={() => setCertImgOk(false)}
+                  style={{ maxHeight: 180, borderRadius: 8, border: '1px solid #334155' }} />
+                {certImgOk && !photo && (
+                  <div style={{ fontSize: 11, color: '#34d399', marginTop: 4 }}>✅ 인증 이미지가 카드 사진으로 사용됩니다</div>
+                )}
+              </div>
+            )}
+            {certNumber.trim() && !getCertImageUrl(gradeCompany, certNumber) && getCertPageUrl(gradeCompany, certNumber) && (
+              <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>💡 조회 버튼을 눌러 {gradeCompany} 사이트에서 이미지/POP을 확인하세요</div>
+            )}
+          </div>
+        )}
 
         {/* Date & Price */}
         <div className="form-field">
@@ -1635,6 +1725,7 @@ function CompareView({ cards, compareIds, onClose, theme }) {
     { key: 'roi', label: '수익률', render: c => c.price > 0 && c.currentValue ? ((c.currentValue - c.price) / c.price * 100).toFixed(1) + '%' : '-' },
     { key: 'purchaseDate', label: '구매일', render: c => formatDate(c.purchaseDate) },
     { key: 'seller', label: '구매처', render: c => c.seller || '-' },
+    { key: 'certNumber', label: '인증번호', render: c => c.certNumber ? '#' + c.certNumber : '-' },
   ];
 
   // Find best values for highlighting
@@ -1654,6 +1745,8 @@ function CompareView({ cards, compareIds, onClose, theme }) {
             <div key={card.id} style={{ textAlign: 'center' }}>
               {card.photo ? (
                 <img src={card.photo} alt={card.name} style={{ width: '100%', aspectRatio: '3/4', objectFit: 'cover', borderRadius: 12, border: '2px solid #334155' }} />
+              ) : getCertImageUrl(getGradeCompanyFromGrade(card.grade), card.certNumber) ? (
+                <img src={getCertImageUrl(getGradeCompanyFromGrade(card.grade), card.certNumber)} alt={card.name} style={{ width: '100%', aspectRatio: '3/4', objectFit: 'cover', borderRadius: 12, border: '2px solid #334155' }} onError={e => { e.target.style.display='none'; }} />
               ) : (
                 <div className="card-noimg" style={{ borderRadius: 12, fontSize: 48 }}>{cat ? cat.emoji : '🎴'}</div>
               )}
