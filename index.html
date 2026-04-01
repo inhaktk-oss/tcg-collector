@@ -291,6 +291,85 @@ async function fetchCertPhoto(company, certNumber) {
   }
   return null;
 }
+
+// ─── v35: Fetch card info (name, grade, POP, estimate) from cert page ───
+async function fetchCertInfo(company, certNum) {
+  const pageUrl = getCertPageUrl(company, certNum);
+  if (!pageUrl) return null;
+  try {
+    const resp = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(pageUrl));
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const html = data.contents || '';
+    if (company === 'PSA') return parsePsaCertHtml(html);
+    if (company === 'BGS') return parseBgsCertHtml(html);
+    // Generic: try og/meta fallback
+    return parseGenericCertHtml(html, company);
+  } catch(e) { return null; }
+}
+
+function parsePsaCertHtml(html) {
+  const info = {};
+  // Title: <title>1999 YU-GI-OH! JAPANESE... | PSA CertLookup</title> or og:title
+  const ogTitle = html.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i)
+    || html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*property=["']og:title["']/i);
+  if (ogTitle) {
+    let t = ogTitle[1].replace(/\s*\|.*$/, '').replace(/&amp;/g, '&').replace(/&#039;/g, "'").replace(/&quot;/g, '"').trim();
+    info.name = t;
+  }
+  // Year
+  const yearM = html.match(/Year<\/(?:span|div|th|td)>\s*<(?:span|div|th|td)[^>]*>\s*(\d{4})/i);
+  if (yearM) info.year = yearM[1];
+  // Grade: "ITEM GRADE" then "NM-MT 8" or via Item Grade field
+  const gradeM = html.match(/Item\s*Grade<\/(?:span|div|th|td)>\s*<(?:span|div|th|td)[^>]*>\s*([^<]+)/i)
+    || html.match(/ITEM\s*GRADE\s*<[^>]*>\s*<[^>]*>\s*([^<]+)/i);
+  if (gradeM) info.gradeLabel = gradeM[1].trim();
+  // PSA Estimate
+  const estM = html.match(/PSA\s*ESTIMATE\s*<[^>]*>\s*<[^>]*>\s*\$?([\d,.]+)/i)
+    || html.match(/PSA\s*Estimate[^<]*<[^>]*>\s*\$?([\d,.]+)/i);
+  if (estM) info.estimate = estM[1].replace(/,/g, '');
+  // POP
+  const popM = html.match(/PSA\s*POPULATION\s*<[^>]*>\s*<[^>]*>\s*([\d,]+)/i)
+    || html.match(/PSA\s*Population[^<]*<[^>]*>\s*([\d,]+)/i);
+  if (popM) info.pop = popM[1].replace(/,/g, '');
+  // POP Higher
+  const phM = html.match(/POP\s*HIGHER\s*<[^>]*>\s*<[^>]*>\s*([\d,]+)/i)
+    || html.match(/Pop\s*Higher[^<]*<[^>]*>\s*([\d,]+)/i);
+  if (phM) info.popHigher = phM[1].replace(/,/g, '');
+  // Subject (card specific name)
+  const subjM = html.match(/Subject<\/(?:span|div|th|td)>\s*<(?:span|div|th|td)[^>]*>\s*([^<]+)/i);
+  if (subjM) info.subject = subjM[1].trim();
+  // Brand
+  const brandM = html.match(/Brand\/Title<\/(?:span|div|th|td)>\s*<(?:span|div|th|td)[^>]*>\s*([^<]+)/i);
+  if (brandM) info.brand = brandM[1].trim();
+  // Category
+  const catM = html.match(/Category<\/(?:span|div|th|td)>\s*<(?:span|div|th|td)[^>]*>\s*([^<]+)/i);
+  if (catM) info.category = catM[1].trim();
+  return info;
+}
+
+function parseBgsCertHtml(html) {
+  const info = {};
+  const ogTitle = html.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i);
+  if (ogTitle) info.name = ogTitle[1].replace(/&amp;/g, '&').trim();
+  const gradeM = html.match(/BGS\s*Grade[:\s]*([^<]+)/i) || html.match(/Overall\s*Grade[:\s]*([^<]+)/i);
+  if (gradeM) info.gradeLabel = gradeM[1].trim();
+  const popM = html.match(/Population[:\s]*([\d,]+)/i);
+  if (popM) info.pop = popM[1].replace(/,/g, '');
+  return info;
+}
+
+function parseGenericCertHtml(html, company) {
+  const info = {};
+  const ogTitle = html.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i)
+    || html.match(/<title>([^<]+)<\/title>/i);
+  if (ogTitle) info.name = ogTitle[1].replace(/&amp;/g, '&').replace(/\s*[-|].*$/, '').trim();
+  const gradeM = html.match(/Grade[:\s]*([\d.]+)/i);
+  if (gradeM) info.gradeLabel = company + ' ' + gradeM[1];
+  const popM = html.match(/Pop(?:ulation)?[:\s]*([\d,]+)/i);
+  if (popM) info.pop = popM[1].replace(/,/g, '');
+  return info;
+}
 function getGradeCompanyFromGrade(grade) {
   if (!grade) return '';
   const match = grade.match(/^(\S+)/);
@@ -1378,6 +1457,8 @@ function CardForm({ card, onSave, onCancel }) {
   const [certNumber, setCertNumber] = useState(card?.certNumber || '');
   const [certImgOk, setCertImgOk] = useState(false);
   const [certFetching, setCertFetching] = useState(false);
+  const [certInfo, setCertInfo] = useState(null);
+  const [certInfoLoading, setCertInfoLoading] = useState(false);
   const fileRef = useRef(null);
 
   async function handleCropDone(result) {
@@ -1528,7 +1609,7 @@ function CardForm({ card, onSave, onCancel }) {
           <div className="form-field">
             <label>🔢 인증번호 (시리얼넘버)</label>
             <div style={{ display: 'flex', gap: 8 }}>
-              <input type="text" inputMode="numeric" value={certNumber} onChange={e => { setCertNumber(e.target.value); setCertImgOk(false); }} placeholder={`${gradeCompany} 인증번호 입력`} style={{ flex: 1 }} />
+              <input type="text" inputMode="numeric" value={certNumber} onChange={e => { setCertNumber(e.target.value); setCertImgOk(false); setCertInfo(null); }} placeholder={`${gradeCompany} 인증번호 입력`} style={{ flex: 1 }} />
               {certNumber.trim() && getCertPageUrl(gradeCompany, certNumber) && (
                 <button type="button" onClick={() => window.open(getCertPageUrl(gradeCompany, certNumber), '_blank')}
                   style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #6366f1', background: 'rgba(99,102,241,0.15)', color: '#a5b4fc', fontSize: 13, cursor: 'pointer', fontWeight: 600, whiteSpace: 'nowrap' }}>
@@ -1536,6 +1617,51 @@ function CardForm({ card, onSave, onCancel }) {
                 </button>
               )}
             </div>
+            {/* Auto-fetch card info */}
+            {certNumber.trim() && getCertPageUrl(gradeCompany, certNumber) && (
+              <button type="button" disabled={certInfoLoading} onClick={async () => {
+                setCertInfoLoading(true);
+                setCertInfo(null);
+                const info = await fetchCertInfo(gradeCompany, certNumber);
+                setCertInfo(info);
+                setCertInfoLoading(false);
+                if (!info) { alert('카드 정보를 가져올 수 없습니다.'); return; }
+                // Auto-fill fields
+                if (info.name && !name.trim()) setName(info.subject ? info.subject + (info.brand ? ' (' + info.brand + ')' : '') : info.name);
+                if (info.gradeLabel) {
+                  const scoreM = info.gradeLabel.match(/([\d.]+)\s*$/);
+                  if (scoreM) setGradeScore(scoreM[1]);
+                }
+                if (info.estimate) setCurrentValue(Math.round(parseFloat(info.estimate) * 1400).toString());
+              }} style={{ marginTop: 8, width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #6366f1', background: 'rgba(99,102,241,0.12)', color: '#a5b4fc', fontSize: 13, cursor: 'pointer', fontWeight: 600 }}>
+                {certInfoLoading ? '⏳ 카드 정보 조회 중...' : '🔎 인증번호로 카드 정보 가져오기'}
+              </button>
+            )}
+            {/* Show fetched cert info */}
+            {certInfo && (
+              <div style={{ marginTop: 8, background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.25)', borderRadius: 10, padding: 12 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: '#a5b4fc', marginBottom: 6 }}>📋 {gradeCompany} 인증 정보</div>
+                {certInfo.name && <div style={{ fontSize: 12, color: '#e2e8f0', marginBottom: 4 }}>📛 <strong>{certInfo.subject || certInfo.name}</strong>{certInfo.brand ? <span style={{ color: '#94a3b8' }}> ({certInfo.brand})</span> : ''}</div>}
+                {certInfo.gradeLabel && <div style={{ fontSize: 12, color: '#e2e8f0', marginBottom: 4 }}>🏅 등급: <strong>{certInfo.gradeLabel}</strong></div>}
+                {certInfo.pop && <div style={{ fontSize: 12, color: '#e2e8f0', marginBottom: 4 }}>📊 POP: <strong>{Number(certInfo.pop).toLocaleString()}</strong>{certInfo.popHigher ? <span style={{ color: '#94a3b8' }}> (상위등급 {Number(certInfo.popHigher).toLocaleString()})</span> : ''}</div>}
+                {certInfo.estimate && <div style={{ fontSize: 12, color: '#34d399', marginBottom: 4 }}>💰 예상가: <strong>${certInfo.estimate}</strong> <span style={{ color: '#94a3b8' }}>(≈ ₩{Math.round(parseFloat(certInfo.estimate) * 1400).toLocaleString('ko-KR')})</span></div>}
+                {certInfo.year && <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 4 }}>📅 연도: {certInfo.year}</div>}
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+                  {certInfo.name && name.trim() !== (certInfo.subject || certInfo.name) && (
+                    <button type="button" onClick={() => setName(certInfo.subject ? certInfo.subject + (certInfo.brand ? ' (' + certInfo.brand + ')' : '') : certInfo.name)}
+                      style={{ padding: '4px 10px', borderRadius: 6, border: '1px solid #475569', background: 'rgba(71,85,105,0.3)', color: '#e2e8f0', fontSize: 11, cursor: 'pointer' }}>카드명 적용</button>
+                  )}
+                  {certInfo.gradeLabel && (() => { const sm = certInfo.gradeLabel.match(/([\d.]+)\s*$/); return sm && gradeScore !== sm[1] ? (
+                    <button type="button" onClick={() => setGradeScore(sm[1])}
+                      style={{ padding: '4px 10px', borderRadius: 6, border: '1px solid #475569', background: 'rgba(71,85,105,0.3)', color: '#e2e8f0', fontSize: 11, cursor: 'pointer' }}>등급 적용</button>
+                  ) : null; })()}
+                  {certInfo.estimate && (
+                    <button type="button" onClick={() => setCurrentValue(Math.round(parseFloat(certInfo.estimate) * 1400).toString())}
+                      style={{ padding: '4px 10px', borderRadius: 6, border: '1px solid #475569', background: 'rgba(71,85,105,0.3)', color: '#e2e8f0', fontSize: 11, cursor: 'pointer' }}>시세 적용</button>
+                  )}
+                </div>
+              </div>
+            )}
             {certNumber.trim() && getCertImageUrl(gradeCompany, certNumber) && (
               <div style={{ marginTop: 8 }}>
                 <div style={{ fontSize: 11, color: '#64748b', marginBottom: 4 }}>📸 {gradeCompany} 인증 이미지 미리보기:</div>
