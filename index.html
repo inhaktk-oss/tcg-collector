@@ -219,20 +219,77 @@ function getCertPageUrl(company, certNum) {
     default: return null;
   }
 }
-// Fetch cert image → base64 data URL
-function fetchCertImageAsDataUrl(url) {
+// Helper: blob → data URL
+function blobToDataUrl(blob) {
   return new Promise((resolve) => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      const c = document.createElement('canvas');
-      c.width = img.naturalWidth; c.height = img.naturalHeight;
-      c.getContext('2d').drawImage(img, 0, 0);
-      try { resolve(c.toDataURL('image/jpeg', 0.85)); } catch(e) { resolve(null); }
-    };
-    img.onerror = () => resolve(null);
-    img.src = url;
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => resolve(null);
+    r.readAsDataURL(blob);
   });
+}
+
+// Robust cert image fetch: direct → canvas → wsrv.nl proxy
+async function fetchCertImageAsDataUrl(url) {
+  if (!url) return null;
+  // 1) Direct fetch (works if server sends CORS headers)
+  try {
+    const resp = await fetch(url, { mode: 'cors' });
+    if (resp.ok) { const b = await resp.blob(); if (b.type.startsWith('image/')) return await blobToDataUrl(b); }
+  } catch(e) {}
+  // 2) Image element with crossOrigin → canvas
+  try {
+    const du = await new Promise((resolve) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => { try { const c = document.createElement('canvas'); c.width = img.naturalWidth; c.height = img.naturalHeight; c.getContext('2d').drawImage(img, 0, 0); resolve(c.toDataURL('image/jpeg', 0.85)); } catch(e) { resolve(null); } };
+      img.onerror = () => resolve(null);
+      img.src = url;
+    });
+    if (du) return du;
+  } catch(e) {}
+  // 3) wsrv.nl image proxy (open-source image CDN, handles CORS)
+  try {
+    const resp = await fetch('https://wsrv.nl/?url=' + encodeURIComponent(url) + '&output=jpg&q=85', { mode: 'cors' });
+    if (resp.ok) { const b = await resp.blob(); if (b.size > 1000) return await blobToDataUrl(b); }
+  } catch(e) {}
+  return null;
+}
+
+// Extract og:image from cert page (for companies without direct image URLs)
+async function fetchOgImageUrl(pageUrl) {
+  if (!pageUrl) return null;
+  try {
+    const resp = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(pageUrl));
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const html = data.contents || '';
+    const m = html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i)
+      || html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["']/i);
+    if (m) return m[1];
+    // fallback: find first large image in the page
+    const imgs = [...html.matchAll(/<img[^>]*src=["']([^"']+)["'][^>]*/gi)];
+    const slab = imgs.find(i => /cert|slab|label|grade|card/i.test(i[0]) && !/logo|icon|avatar/i.test(i[0]));
+    return slab ? slab[1] : null;
+  } catch(e) { return null; }
+}
+
+// Master function: fetch cert image for any grading company
+async function fetchCertPhoto(company, certNumber) {
+  // 1) Try direct image URL (PSA etc.)
+  const directUrl = getCertImageUrl(company, certNumber);
+  if (directUrl) {
+    const result = await fetchCertImageAsDataUrl(directUrl);
+    if (result) return result;
+  }
+  // 2) Try og:image from cert page (BGS, SGC, CGC, BRG etc.)
+  const pageUrl = getCertPageUrl(company, certNumber);
+  const ogUrl = await fetchOgImageUrl(pageUrl);
+  if (ogUrl) {
+    const result = await fetchCertImageAsDataUrl(ogUrl);
+    if (result) return result;
+  }
+  return null;
 }
 function getGradeCompanyFromGrade(grade) {
   if (!grade) return '';
@@ -1484,24 +1541,20 @@ function CardForm({ card, onSave, onCancel }) {
                 <div style={{ fontSize: 11, color: '#64748b', marginBottom: 4 }}>📸 {gradeCompany} 인증 이미지 미리보기:</div>
                 <img src={getCertImageUrl(gradeCompany, certNumber)} alt="cert" onLoad={() => setCertImgOk(true)} onError={() => setCertImgOk(false)}
                   style={{ maxHeight: 180, borderRadius: 8, border: '1px solid #334155' }} />
-                {certImgOk && !photo && (
-                  <div style={{ fontSize: 11, color: '#34d399', marginTop: 4 }}>✅ 인증 이미지가 카드 사진으로 사용됩니다</div>
-                )}
-                {certImgOk && (
-                  <button type="button" disabled={certFetching} onClick={async () => {
-                    setCertFetching(true);
-                    const url = getCertImageUrl(gradeCompany, certNumber);
-                    const dataUrl = await fetchCertImageAsDataUrl(url);
-                    if (dataUrl) { setPhoto(dataUrl); } else { alert('이미지를 가져올 수 없습니다. CORS 제한일 수 있어요.'); }
-                    setCertFetching(false);
-                  }} style={{ marginTop: 6, width: '100%', padding: '8px 12px', borderRadius: 8, border: '1px solid #34d399', background: photo ? 'rgba(52,211,153,0.08)' : 'rgba(52,211,153,0.18)', color: '#34d399', fontSize: 12, cursor: 'pointer', fontWeight: 600 }}>
-                    {certFetching ? '⏳ 가져오는 중...' : photo ? '📸 인증 이미지로 사진 교체' : '📸 인증 이미지를 사진으로 저장'}
-                  </button>
-                )}
               </div>
             )}
-            {certNumber.trim() && !getCertImageUrl(gradeCompany, certNumber) && getCertPageUrl(gradeCompany, certNumber) && (
-              <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>💡 조회 버튼을 눌러 {gradeCompany} 사이트에서 이미지/POP을 확인하세요</div>
+            {certNumber.trim() && getCertPageUrl(gradeCompany, certNumber) && (
+              <button type="button" disabled={certFetching} onClick={async () => {
+                setCertFetching(true);
+                const dataUrl = await fetchCertPhoto(gradeCompany, certNumber);
+                if (dataUrl) { setPhoto(dataUrl); } else { alert(gradeCompany + ' 인증 이미지를 자동으로 가져올 수 없습니다.\n인증 조회 페이지에서 이미지를 저장 후 사진으로 등록해주세요.'); }
+                setCertFetching(false);
+              }} style={{ marginTop: 8, width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #34d399', background: photo ? 'rgba(52,211,153,0.08)' : 'rgba(52,211,153,0.18)', color: '#34d399', fontSize: 13, cursor: 'pointer', fontWeight: 600 }}>
+                {certFetching ? '⏳ 인증 이미지 가져오는 중...' : photo ? `📸 ${gradeCompany} 인증 이미지로 사진 교체` : `📸 ${gradeCompany} 인증 이미지를 사진으로 저장`}
+              </button>
+            )}
+            {certNumber.trim() && !getCertPageUrl(gradeCompany, certNumber) && (
+              <div style={{ fontSize: 11, color: '#64748b', marginTop: 4 }}>💡 이 등급업체는 인증 조회를 지원하지 않습니다</div>
             )}
           </div>
         )}
