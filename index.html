@@ -56,6 +56,37 @@
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
   @media (max-width: 640px) { .card-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; } }
+
+  /* ─── v31: Animations ─── */
+  @keyframes tcgFadeIn { from { opacity:0; transform:translateY(10px) } to { opacity:1; transform:translateY(0) } }
+  @keyframes tcgSlideUp { from { opacity:0; transform:translateY(24px) } to { opacity:1; transform:translateY(0) } }
+  @keyframes tcgPopIn { from { opacity:0; transform:scale(0.93) } to { opacity:1; transform:scale(1) } }
+  .anim-fade { animation: tcgFadeIn 0.3s ease-out both; }
+  .anim-slide { animation: tcgSlideUp 0.35s ease-out both; }
+  .anim-pop { animation: tcgPopIn 0.25s ease-out both; }
+  .card-item { animation: tcgFadeIn 0.35s ease-out both; }
+
+  /* ─── v31: Light Theme ─── */
+  [data-theme="light"] body { background: #f1f5f9 !important; color: #1e293b !important; }
+  [data-theme="light"] .card-item { background: #fff !important; border-color: #e2e8f0 !important; }
+  [data-theme="light"] .card-item:hover { box-shadow: 0 8px 24px rgba(0,0,0,0.08) !important; }
+  [data-theme="light"] .stat-card { background: linear-gradient(135deg, #fff, #f8fafc) !important; border-color: #e2e8f0 !important; }
+  [data-theme="light"] input, [data-theme="light"] select, [data-theme="light"] textarea { background: #fff !important; color: #1e293b !important; border-color: #cbd5e1 !important; }
+  [data-theme="light"] .modal-content { background: #fff !important; border-color: #e2e8f0 !important; color: #1e293b !important; }
+  [data-theme="light"] .modal-overlay { background: rgba(0,0,0,0.25) !important; }
+  [data-theme="light"] .btn-outline { color: #475569 !important; border-color: #cbd5e1 !important; }
+  [data-theme="light"] .card-noimg { background: linear-gradient(135deg, #e2e8f0, #f1f5f9) !important; }
+  [data-theme="light"] ::-webkit-scrollbar-thumb { background: #cbd5e1 !important; }
+
+  /* ─── v31: Batch/Compare ─── */
+  .batch-bar { position:fixed; bottom:0; left:0; right:0; background:#1e293b; border-top:2px solid #6366f1; padding:12px 16px; z-index:40; animation:tcgSlideUp 0.3s ease-out; display:flex; align-items:center; gap:8px; justify-content:center; flex-wrap:wrap; }
+  [data-theme="light"] .batch-bar { background:#fff !important; }
+  .batch-check { position:absolute; top:6px; left:6px; z-index:5; width:22px; height:22px; accent-color:#6366f1; cursor:pointer; }
+  .compare-fab { position:fixed; bottom:20px; right:20px; z-index:35; background:#6366f1; color:#fff; border:none; border-radius:50%; width:56px; height:56px; font-size:20px; cursor:pointer; box-shadow:0 4px 16px rgba(99,102,241,0.5); animation:tcgPopIn 0.3s ease-out; }
+  .compare-fab:hover { background:#4f46e5; transform:scale(1.05); }
+  .dash-chart { background:#1e293b; border:1px solid #334155; border-radius:12px; padding:16px; margin-bottom:16px; }
+  [data-theme="light"] .dash-chart { background:#fff !important; border-color:#e2e8f0 !important; }
+
 </style>
 </head>
 <body>
@@ -293,11 +324,76 @@ function App() {
   const [pageSize, setPageSize] = useState(20);
   const [showExport, setShowExport] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [theme, setTheme] = useState(() => localStorage.getItem('tcg_theme') || 'dark');
+  const [batchMode, setBatchMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [compareIds, setCompareIds] = useState([]);
   const [syncStatus, setSyncStatus] = useState('');
   const syncTimer = useRef(null);
 
   useEffect(() => { saveCards(cards); }, [cards]);
   useEffect(() => { setPageSize(20); }, [filter, statusFilter, search]);
+
+  // v31: Theme effect
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem('tcg_theme', theme);
+    // Update theme-color meta
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.content = theme === 'dark' ? '#1e293b' : '#f1f5f9';
+  }, [theme]);
+
+  // v31: Auto-sync on app start
+  useEffect(() => {
+    const cfg = getSyncConfig();
+    if (cfg?.token && cfg?.gistId) {
+      // Silent pull on app open
+      pullFromGist(true);
+    }
+  }, []);
+
+  // v31: Auto-sync after card changes (debounced)
+  const autoSyncTimer = useRef(null);
+  function scheduleAutoSync() {
+    if (autoSyncTimer.current) clearTimeout(autoSyncTimer.current);
+    autoSyncTimer.current = setTimeout(() => {
+      const cfg = getSyncConfig();
+      if (cfg?.token && cfg?.gistId) pushToGist();
+    }, 5000);
+  }
+
+  // v31: Batch helpers
+  function toggleSelectId(id) {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+  function batchSetStatus(newStatus) {
+    setCards(prev => prev.map(c => selectedIds.has(c.id) ? { ...c, status: newStatus, updatedAt: Date.now() } : c));
+    setBatchMode(false); setSelectedIds(new Set());
+    scheduleAutoSync();
+  }
+  function batchSetCategory(newCat) {
+    setCards(prev => prev.map(c => selectedIds.has(c.id) ? { ...c, category: newCat, updatedAt: Date.now() } : c));
+    setBatchMode(false); setSelectedIds(new Set());
+    scheduleAutoSync();
+  }
+  function batchDelete() {
+    if (!confirm(selectedIds.size + '장의 카드를 삭제하시겠습니까?')) return;
+    setCards(prev => prev.filter(c => !selectedIds.has(c.id)));
+    setBatchMode(false); setSelectedIds(new Set());
+    scheduleAutoSync();
+  }
+  // v31: Compare toggle
+  function toggleCompare(id) {
+    setCompareIds(prev => {
+      if (prev.includes(id)) return prev.filter(x => x !== id);
+      if (prev.length >= 3) return prev; // max 3
+      return [...prev, id];
+    });
+  }
 
   // ═══ Robust Sync: merge both sides, save everywhere atomically ═══
   const syncingRef = useRef(false);
@@ -480,25 +576,29 @@ function App() {
   function addCard(card) {
     setCards(prev => [...prev, { ...card, id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), createdAt: Date.now() }]);
     setScreen('list');
+    scheduleAutoSync();
   }
   function updateCard(updated) {
     setCards(prev => prev.map(c => c.id === updated.id ? { ...c, ...updated, updatedAt: Date.now() } : c));
     setSelectedCard(prev => ({ ...prev, ...updated }));
     setScreen('detail');
     setEditCard(null);
+    scheduleAutoSync();
   }
   function deleteCard(id) {
     setCards(prev => prev.filter(c => c.id !== id));
     setSelectedCard(null);
     setShowDeleteConfirm(false);
     setScreen('list');
+    scheduleAutoSync();
   }
 
   function exportCSV() {
-    const header = '이름,카테고리,등급,구매일,구매가(원),판매처,메모,등록일';
+    const header = '이름,카테고리,등급,상태,구매일,구매가(원),현재시세(원),판매가(원),판매일,판매처,메모,등록일';
     const rows = cards.map(c => {
       const cat = CATEGORIES.find(x => x.value === c.category);
-      return [c.name, cat ? cat.label : c.category, c.grade || '', c.purchaseDate || '', c.price || '', c.seller || '', (c.memo || '').replace(/,/g, ' '), new Date(c.createdAt).toLocaleDateString('ko-KR')].join(',');
+      const st = CARD_STATUSES.find(s => s.value === (c.status || 'owned'));
+      return [c.name, cat ? cat.label : c.category, c.grade || '', st ? st.label : '보유', c.purchaseDate || '', c.price || 0, c.currentValue || 0, c.soldPrice || 0, c.soldDate || '', c.seller || '', (c.memo || '').replace(/,/g, ' '), new Date(c.createdAt).toLocaleDateString('ko-KR')].join(',');
     });
     const csv = '\uFEFF' + header + '\n' + rows.join('\n');
     downloadFile(csv, 'tcg_collection.csv', 'text/csv;charset=utf-8');
@@ -548,6 +648,8 @@ function App() {
   if (screen === 'add') return <CardForm onSave={addCard} onCancel={() => setScreen('list')} />;
   if (screen === 'edit' && editCard) return <CardForm card={editCard} onSave={updateCard} onCancel={() => { setScreen('detail'); setEditCard(null); }} />;
   if (screen === 'sync') return <SyncScreen onBack={() => setScreen('list')} onSync={doSync} onPush={pushToGist} onPull={() => pullFromGist(false)} onRestore={(restored) => saveMergedCards(restored)} cardCount={cards.length} />;
+  if (screen === 'dashboard') return <Dashboard cards={cards} stats={stats} onClose={() => setScreen('list')} theme={theme} />;
+  if (screen === 'compare') return <CompareView cards={cards} compareIds={compareIds} onClose={() => { setCompareIds([]); setScreen('list'); }} theme={theme} />;
   if (screen === 'detail' && selectedCard) {
     const cat = CATEGORIES.find(x => x.value === selectedCard.category);
     return (
@@ -643,13 +745,17 @@ function App() {
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
         <h1 style={{ fontSize: 22, fontWeight: 800 }}>🃏 My TCG</h1>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button className="btn btn-outline" style={{ padding: '8px 12px', fontSize: 13 }} onClick={doSync} title="클라우드 동기화">
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button className="btn btn-outline" style={{ padding: '8px 10px', fontSize: 13 }} onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')} title="테마 전환">
+            {theme === 'dark' ? '☀️' : '🌙'}
+          </button>
+          <button className="btn btn-outline" style={{ padding: '8px 10px', fontSize: 13 }} onClick={() => setScreen('dashboard')} title="대시보드">📊</button>
+          <button className="btn btn-outline" style={{ padding: '8px 10px', fontSize: 13 }} onClick={doSync} title="클라우드 동기화">
             {syncStatus === 'syncing' ? '⏳' : syncStatus === 'done' ? '✅' : syncStatus === 'error' ? '❌' : '☁️'}
           </button>
-          <button className="btn btn-outline" style={{ padding: '8px 12px', fontSize: 13 }} onClick={() => setScreen('sync')} title="동기화 설정">⚙️</button>
-          <button className="btn btn-outline" style={{ padding: '8px 12px', fontSize: 13 }} onClick={() => setShowExport(true)}>📁</button>
-          <button className="btn btn-primary" style={{ padding: '8px 16px' }} onClick={() => setScreen('add')}>+ 등록</button>
+          <button className="btn btn-outline" style={{ padding: '8px 10px', fontSize: 13 }} onClick={() => setScreen('sync')} title="동기화 설정">⚙️</button>
+          <button className="btn btn-outline" style={{ padding: '8px 10px', fontSize: 13 }} onClick={() => setShowExport(true)}>📁</button>
+          <button className="btn btn-primary" style={{ padding: '8px 14px' }} onClick={() => setScreen('add')}>+ 등록</button>
         </div>
       </div>
 
@@ -698,11 +804,26 @@ function App() {
       </div>
 
       {/* Search & Sort */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
         <input type="text" placeholder="🔍 카드명, 메모, 판매처 검색..." value={search} onChange={e => setSearch(e.target.value)} style={{ flex: 1 }} />
         <select value={sort} onChange={e => setSort(e.target.value)} style={{ width: 130, fontSize: 13 }}>
           {SORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
+      </div>
+
+      {/* v31: Batch & Compare toolbar */}
+      <div style={{ display: 'flex', gap: 6, marginBottom: 16, alignItems: 'center' }}>
+        <button onClick={() => { setBatchMode(!batchMode); setSelectedIds(new Set()); }} className={`btn ${batchMode ? 'btn-primary' : 'btn-outline'}`} style={{ padding: '6px 12px', fontSize: 12 }}>
+          {batchMode ? '✕ 선택 해제' : '☑️ 일괄편집'}
+        </button>
+        {batchMode && selectedIds.size > 0 && (
+          <span style={{ fontSize: 12, color: '#6366f1', fontWeight: 600 }}>{selectedIds.size}장 선택됨</span>
+        )}
+        {!batchMode && compareIds.length > 0 && (
+          <button onClick={() => { setCompareIds([]); }} className="btn btn-outline" style={{ padding: '6px 12px', fontSize: 12 }}>
+            비교 초기화 ({compareIds.length})
+          </button>
+        )}
       </div>
 
       {/* Card Grid */}
@@ -718,7 +839,12 @@ function App() {
           {filtered.slice(0, pageSize).map(card => {
             const cat = CATEGORIES.find(x => x.value === card.category);
             return (
-              <div key={card.id} className="card-item" onClick={() => { setSelectedCard(card); setScreen('detail'); }} style={card.status === 'sold' ? { opacity: 0.6 } : card.status === 'wishlist' ? { borderColor: '#f59e0b' } : {}}>
+              <div key={card.id} className="card-item" onClick={() => {
+                if (batchMode) { toggleSelectId(card.id); return; }
+                setSelectedCard(card); setScreen('detail');
+              }} style={{ ...(card.status === 'sold' ? { opacity: 0.6 } : card.status === 'wishlist' ? { borderColor: '#f59e0b' } : {}), position: 'relative', ...(selectedIds.has(card.id) ? { borderColor: '#6366f1', boxShadow: '0 0 0 2px rgba(99,102,241,0.4)' } : {}), ...(compareIds.includes(card.id) ? { borderColor: '#f59e0b', boxShadow: '0 0 0 2px rgba(245,158,11,0.4)' } : {}) }}>
+                {batchMode && <input type="checkbox" className="batch-check" checked={selectedIds.has(card.id)} onChange={() => toggleSelectId(card.id)} onClick={e => e.stopPropagation()} />}
+                {!batchMode && <button className="batch-check" onClick={e => { e.stopPropagation(); toggleCompare(card.id); }} style={{ background: compareIds.includes(card.id) ? '#f59e0b' : 'rgba(0,0,0,0.4)', border: '2px solid ' + (compareIds.includes(card.id) ? '#f59e0b' : 'rgba(255,255,255,0.3)'), borderRadius: 6, width: 22, height: 22, fontSize: 10, color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }} title="비교에 추가">{compareIds.includes(card.id) ? '⚖️' : '+'}</button>}
                 {card.photo ? (
                   <LazyImage src={card.photo} alt={card.name} className="card-img" />
                 ) : (
@@ -747,6 +873,30 @@ function App() {
           </button>
         )}
         </div>
+      )}
+
+
+      {/* v31: Batch action bar */}
+      {batchMode && selectedIds.size > 0 && (
+        <div className="batch-bar">
+          <span style={{ fontSize: 13, fontWeight: 600 }}>{selectedIds.size}장 선택</span>
+          <select onChange={e => { if (e.target.value) batchSetStatus(e.target.value); e.target.value = ''; }} style={{ width: 110, fontSize: 12, padding: '6px 8px' }}>
+            <option value="">상태 변경...</option>
+            {CARD_STATUSES.map(st => <option key={st.value} value={st.value}>{st.emoji} {st.label}</option>)}
+          </select>
+          <select onChange={e => { if (e.target.value) batchSetCategory(e.target.value); e.target.value = ''; }} style={{ width: 110, fontSize: 12, padding: '6px 8px' }}>
+            <option value="">카테고리 변경...</option>
+            {CATEGORIES.map(cat => <option key={cat.value} value={cat.value}>{cat.emoji} {cat.label}</option>)}
+          </select>
+          <button onClick={batchDelete} className="btn btn-danger" style={{ padding: '6px 12px', fontSize: 12 }}>🗑️</button>
+        </div>
+      )}
+
+      {/* v31: Compare FAB */}
+      {!batchMode && compareIds.length >= 2 && (
+        <button className="compare-fab" onClick={() => setScreen('compare')} title="카드 비교하기">
+          ⚖️
+        </button>
       )}
 
       {/* Export Modal */}
@@ -1302,6 +1452,240 @@ function CardForm({ card, onSave, onCancel }) {
   );
 }
 
+
+// ─── v31: Dashboard ───
+function Dashboard({ cards, stats, onClose, theme }) {
+  // Category distribution data
+  const catData = CATEGORIES.map(cat => ({
+    ...cat, count: cards.filter(c => c.category === cat.value).length
+  })).filter(d => d.count > 0);
+  const total = catData.reduce((s, d) => s + d.count, 0) || 1;
+  const catColors = { pokemon: '#fbbf24', sports: '#34d399', yugioh: '#a78bfa', other: '#64748b' };
+
+  // Pie chart arcs
+  function polarXY(cx, cy, r, deg) {
+    const rad = (deg - 90) * Math.PI / 180;
+    return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)];
+  }
+  function arcPath(cx, cy, r, startDeg, endDeg) {
+    if (endDeg - startDeg >= 359.99) return `M ${cx-r} ${cy} A ${r} ${r} 0 1 1 ${cx+r} ${cy} A ${r} ${r} 0 1 1 ${cx-r} ${cy}`;
+    const [sx, sy] = polarXY(cx, cy, r, startDeg);
+    const [ex, ey] = polarXY(cx, cy, r, endDeg);
+    const large = endDeg - startDeg > 180 ? 1 : 0;
+    return `M ${cx} ${cy} L ${sx} ${sy} A ${r} ${r} 0 ${large} 1 ${ex} ${ey} Z`;
+  }
+  let cumDeg = 0;
+  const arcs = catData.map(d => {
+    const deg = (d.count / total) * 360;
+    const arc = { ...d, startDeg: cumDeg, endDeg: cumDeg + deg };
+    cumDeg += deg;
+    return arc;
+  });
+
+  // Monthly trend (last 6 months)
+  const monthData = [];
+  const now = new Date();
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const key = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+    const label = (d.getMonth() + 1) + '월';
+    const mc = cards.filter(c => c.purchaseDate && c.purchaseDate.startsWith(key));
+    monthData.push({ key, label, count: mc.length, spent: mc.reduce((s, c) => s + (c.price || 0), 0) });
+  }
+  const maxSpent = Math.max(...monthData.map(m => m.spent), 1);
+  const maxCount = Math.max(...monthData.map(m => m.count), 1);
+
+  // Status breakdown
+  const owned = cards.filter(c => (c.status || 'owned') === 'owned');
+  const wishlist = cards.filter(c => c.status === 'wishlist');
+  const sold = cards.filter(c => c.status === 'sold');
+  const totalInvest = owned.reduce((s, c) => s + (c.price || 0), 0);
+  const totalValue = owned.reduce((s, c) => s + (c.currentValue || c.price || 0), 0);
+  const soldRevenue = sold.reduce((s, c) => s + (c.soldPrice || 0), 0);
+  const soldCost = sold.reduce((s, c) => s + (c.price || 0), 0);
+
+  return (
+    <div style={{ maxWidth: 640, margin: '0 auto', padding: 16, paddingBottom: 40 }} className="anim-fade">
+      <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 15, cursor: 'pointer', color: '#94a3b8', marginBottom: 16 }}>← 목록으로</button>
+      <h2 style={{ fontSize: 20, fontWeight: 800, marginBottom: 20 }}>📊 대시보드</h2>
+
+      {/* Summary row */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 10, marginBottom: 20 }}>
+        <div className="stat-card">
+          <div style={{ fontSize: 12, color: '#94a3b8' }}>총 카드</div>
+          <div style={{ fontSize: 28, fontWeight: 800 }}>{cards.length}<span style={{ fontSize: 13, color: '#64748b' }}>장</span></div>
+        </div>
+        <div className="stat-card">
+          <div style={{ fontSize: 12, color: '#94a3b8' }}>총 투자액</div>
+          <div style={{ fontSize: 20, fontWeight: 800, color: '#6366f1' }}>{totalInvest > 0 ? (totalInvest >= 10000 ? Math.floor(totalInvest/10000).toLocaleString()+'만' : totalInvest.toLocaleString()) + '원' : '-'}</div>
+        </div>
+        <div className="stat-card">
+          <div style={{ fontSize: 12, color: '#94a3b8' }}>보유 시세</div>
+          <div style={{ fontSize: 20, fontWeight: 800, color: totalValue >= totalInvest ? '#10b981' : '#ef4444' }}>{totalValue > 0 ? (totalValue >= 10000 ? Math.floor(totalValue/10000).toLocaleString()+'만' : totalValue.toLocaleString()) + '원' : '-'}</div>
+        </div>
+        <div className="stat-card">
+          <div style={{ fontSize: 12, color: '#94a3b8' }}>판매 수익</div>
+          <div style={{ fontSize: 20, fontWeight: 800, color: soldRevenue >= soldCost ? '#10b981' : '#ef4444' }}>{soldRevenue > 0 ? '+' + (soldRevenue - soldCost >= 10000 ? Math.floor((soldRevenue-soldCost)/10000).toLocaleString()+'만' : (soldRevenue-soldCost).toLocaleString()) + '원' : '-'}</div>
+        </div>
+      </div>
+
+      {/* Pie Chart */}
+      <div className="dash-chart">
+        <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 12 }}>📁 카테고리 분포</h3>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 20, justifyContent: 'center', flexWrap: 'wrap' }}>
+          <svg viewBox="0 0 200 200" width="160" height="160">
+            {arcs.length > 0 ? arcs.map((a, i) => (
+              <path key={i} d={arcPath(100, 100, 85, a.startDeg, a.endDeg)} fill={catColors[a.value]} stroke={theme === 'dark' ? '#0f172a' : '#f1f5f9'} strokeWidth="2" />
+            )) : <circle cx="100" cy="100" r="85" fill="#334155"/>}
+            <circle cx="100" cy="100" r="45" fill={theme === 'dark' ? '#0f172a' : '#f1f5f9'} />
+            <text x="100" y="95" textAnchor="middle" fill={theme === 'dark' ? '#e2e8f0' : '#1e293b'} fontSize="24" fontWeight="800">{cards.length}</text>
+            <text x="100" y="115" textAnchor="middle" fill="#94a3b8" fontSize="11">전체</text>
+          </svg>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {catData.map(d => (
+              <div key={d.value} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                <div style={{ width: 12, height: 12, borderRadius: 3, background: catColors[d.value] }}/>
+                <span>{d.emoji} {d.label}</span>
+                <span style={{ fontWeight: 700 }}>{d.count}장</span>
+                <span style={{ color: '#64748b', fontSize: 11 }}>({Math.round(d.count/total*100)}%)</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Monthly trend bar chart */}
+      <div className="dash-chart">
+        <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 12 }}>📈 월별 구매 추이 (최근 6개월)</h3>
+        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 140, padding: '0 8px' }}>
+          {monthData.map(m => (
+            <div key={m.key} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+              {m.spent > 0 && <div style={{ fontSize: 9, color: '#94a3b8', marginBottom: 2 }}>{m.spent >= 10000 ? Math.floor(m.spent/10000)+'만' : m.spent.toLocaleString()}</div>}
+              <div style={{ width: '100%', maxWidth: 40, height: Math.max(m.spent > 0 ? 8 : 0, (m.spent / maxSpent) * 100), background: 'linear-gradient(to top, #6366f1, #818cf8)', borderRadius: '6px 6px 0 0', transition: 'height 0.5s ease' }}/>
+              <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 4 }}>{m.label}</div>
+              <div style={{ fontSize: 10, color: '#6366f1', fontWeight: 600 }}>{m.count}장</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Status breakdown */}
+      <div className="dash-chart">
+        <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 12 }}>📋 상태별 현황</h3>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+          {[
+            { label: '보유', count: owned.length, color: '#6366f1', icon: '📦' },
+            { label: '위시리스트', count: wishlist.length, color: '#f59e0b', icon: '⭐' },
+            { label: '판매완료', count: sold.length, color: '#10b981', icon: '💰' },
+          ].map(s => (
+            <div key={s.label} style={{ textAlign: 'center', padding: 12, borderRadius: 10, border: '1px solid ' + s.color + '33', background: s.color + '11' }}>
+              <div style={{ fontSize: 24 }}>{s.icon}</div>
+              <div style={{ fontSize: 22, fontWeight: 800, color: s.color }}>{s.count}</div>
+              <div style={{ fontSize: 12, color: '#94a3b8' }}>{s.label}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Top valuable cards */}
+      {owned.filter(c => c.currentValue > 0).length > 0 && (
+        <div className="dash-chart">
+          <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 12 }}>💎 가치 TOP 5</h3>
+          {owned.filter(c => c.currentValue > 0).sort((a, b) => (b.currentValue || 0) - (a.currentValue || 0)).slice(0, 5).map((c, i) => {
+            const cat = CATEGORIES.find(x => x.value === c.category);
+            const roi = c.price > 0 ? ((c.currentValue - c.price) / c.price * 100).toFixed(0) : 0;
+            return (
+              <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: '1px solid #334155' }}>
+                <span style={{ fontSize: 16, fontWeight: 800, color: '#6366f1', width: 24 }}>{i + 1}</span>
+                <span style={{ flex: 1, fontSize: 14, fontWeight: 600 }}>{cat?.emoji} {c.name}</span>
+                <span style={{ fontSize: 14, fontWeight: 700, color: '#10b981' }}>{formatPrice(c.currentValue)}</span>
+                {roi != 0 && <span style={{ fontSize: 11, color: roi >= 0 ? '#10b981' : '#ef4444', fontWeight: 600 }}>{roi >= 0 ? '+' : ''}{roi}%</span>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── v31: Card Compare View ───
+function CompareView({ cards, compareIds, onClose, theme }) {
+  const compareCards = compareIds.map(id => cards.find(c => c.id === id)).filter(Boolean);
+
+  if (compareCards.length < 2) {
+    return (
+      <div style={{ maxWidth: 640, margin: '0 auto', padding: 16, textAlign: 'center' }} className="anim-fade">
+        <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 15, cursor: 'pointer', color: '#94a3b8', marginBottom: 16 }}>← 돌아가기</button>
+        <div className="empty-state">
+          <div style={{ fontSize: 64, marginBottom: 16 }}>⚖️</div>
+          <p>비교할 카드를 2장 이상 선택해주세요</p>
+          <p style={{ fontSize: 13, color: '#64748b', marginTop: 8 }}>카드 목록에서 좌상단 + 버튼으로 비교 카드를 추가할 수 있어요</p>
+        </div>
+      </div>
+    );
+  }
+
+  const fields = [
+    { key: 'category', label: '카테고리', render: c => { const cat = CATEGORIES.find(x => x.value === c.category); return cat ? cat.emoji + ' ' + cat.label : c.category; }},
+    { key: 'grade', label: '등급', render: c => c.grade || '-' },
+    { key: 'status', label: '상태', render: c => { const st = CARD_STATUSES.find(s => s.value === (c.status || 'owned')); return st ? st.emoji + ' ' + st.label : '-'; }},
+    { key: 'price', label: '구매가', render: c => formatPrice(c.price) },
+    { key: 'currentValue', label: '현재 시세', render: c => c.currentValue ? formatPrice(c.currentValue) : '-' },
+    { key: 'roi', label: '수익률', render: c => c.price > 0 && c.currentValue ? ((c.currentValue - c.price) / c.price * 100).toFixed(1) + '%' : '-' },
+    { key: 'purchaseDate', label: '구매일', render: c => formatDate(c.purchaseDate) },
+    { key: 'seller', label: '구매처', render: c => c.seller || '-' },
+  ];
+
+  // Find best values for highlighting
+  const bestPrice = Math.min(...compareCards.map(c => c.price || Infinity));
+  const bestValue = Math.max(...compareCards.map(c => c.currentValue || 0));
+
+  return (
+    <div style={{ maxWidth: 800, margin: '0 auto', padding: 16, paddingBottom: 40 }} className="anim-fade">
+      <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 15, cursor: 'pointer', color: '#94a3b8', marginBottom: 16 }}>← 돌아가기</button>
+      <h2 style={{ fontSize: 20, fontWeight: 800, marginBottom: 20 }}>⚖️ 카드 비교 ({compareCards.length}장)</h2>
+
+      {/* Photo row */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(' + compareCards.length + ', 1fr)', gap: 12, marginBottom: 20 }}>
+        {compareCards.map(card => {
+          const cat = CATEGORIES.find(x => x.value === card.category);
+          return (
+            <div key={card.id} style={{ textAlign: 'center' }}>
+              {card.photo ? (
+                <img src={card.photo} alt={card.name} style={{ width: '100%', aspectRatio: '3/4', objectFit: 'cover', borderRadius: 12, border: '2px solid #334155' }} />
+              ) : (
+                <div className="card-noimg" style={{ borderRadius: 12, fontSize: 48 }}>{cat ? cat.emoji : '🎴'}</div>
+              )}
+              <div style={{ fontSize: 14, fontWeight: 700, marginTop: 8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{card.name}</div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Comparison table */}
+      <div style={{ borderRadius: 12, overflow: 'hidden', border: '1px solid #334155' }}>
+        {fields.map((field, fi) => (
+          <div key={field.key} style={{ display: 'grid', gridTemplateColumns: '100px repeat(' + compareCards.length + ', 1fr)', borderBottom: fi < fields.length - 1 ? '1px solid #334155' : 'none' }}>
+            <div style={{ padding: '10px 12px', fontSize: 12, color: '#94a3b8', fontWeight: 600, background: theme === 'dark' ? '#0f172a' : '#f1f5f9' }}>{field.label}</div>
+            {compareCards.map(card => {
+              const val = field.render(card);
+              let highlight = false;
+              if (field.key === 'price' && card.price === bestPrice && bestPrice < Infinity) highlight = true;
+              if (field.key === 'currentValue' && card.currentValue === bestValue && bestValue > 0) highlight = true;
+              return (
+                <div key={card.id} style={{ padding: '10px 12px', fontSize: 13, fontWeight: highlight ? 700 : 400, color: highlight ? '#10b981' : undefined, background: theme === 'dark' ? '#1e293b' : '#fff', borderLeft: '1px solid #334155' }}>
+                  {val} {highlight && '👑'}
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function SyncScreen({ onBack, onSync, onPush, onPull, onRestore, cardCount }) {
   const [cfg, setCfg] = useState(getSyncConfig() || { token: '', gistId: '' });
   const [status, setStatus] = useState('');
@@ -1388,16 +1772,29 @@ function SyncScreen({ onBack, onSync, onPush, onPull, onRestore, cardCount }) {
               }
               if (items.length === 0) { setStatus('히스토리가 없습니다.'); return; }
               const msg = items.map((it, i) => `${i+1}. ${new Date(it.date).toLocaleString('ko-KR')} — 총 ${it.count}장 (포켓몬 ${it.pokemonCount}장)`).join('\n');
-              const pick = prompt('복구할 버전 번호를 입력하세요:\n\n' + msg);
-              if (pick && items[parseInt(pick) - 1]) {
-                const chosen = items[parseInt(pick) - 1];
-                const remoteCards = chosen.data.cards || [];
-                const finalCards = remoteCards.map(c => {
-                  const { syncPhoto, ...d } = c;
-                  return { ...d, photo: syncPhoto || d.photo || '' };
-                }).sort((a, b) => b.createdAt - a.createdAt);
-                onRestore(finalCards);
-                setStatus(`✅ ${new Date(chosen.date).toLocaleString('ko-KR')} 버전 복구 완료! (${chosen.count}장)`);
+              const pick = prompt('복구할 버전 번호를 입력하세요 (뒤에 m 추가시 현재 데이터와 병합, 예: 3m):\n\n' + msg);
+              if (pick) {
+                const doMerge = pick.toLowerCase().includes('m');
+                const idx = parseInt(pick) - 1;
+                if (items[idx]) {
+                  const chosen = items[idx];
+                  const remoteCards = (chosen.data.cards || []).map(c => {
+                    const { syncPhoto, ...d } = c;
+                    return { ...d, photo: syncPhoto || d.photo || '' };
+                  });
+                  if (doMerge) {
+                    const localCards = JSON.parse(localStorage.getItem('tcg_cards') || '[]');
+                    const merged = mergeCards(localCards, remoteCards).sort((a, b) => b.createdAt - a.createdAt);
+                    onRestore(merged);
+                    setStatus('✅ 병합 복구 완료! 현재 ' + localCards.length + '장 + 히스토리 ' + remoteCards.length + '장 → ' + merged.length + '장');
+                  } else {
+                    const finalCards = remoteCards.sort((a, b) => b.createdAt - a.createdAt);
+                    onRestore(finalCards);
+                    setStatus('✅ ' + new Date(chosen.date).toLocaleString('ko-KR') + ' 버전 복구 완료! (' + chosen.count + '장)');
+                  }
+                } else {
+                  setStatus('잘못된 번호입니다');
+                }
               } else {
                 setStatus('복구 취소됨');
               }
