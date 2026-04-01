@@ -302,6 +302,8 @@ async function fetchCertPhoto(company, certNumber) {
 
 // ─── v35: Fetch card info (name, grade, POP, estimate) from cert page ───
 async function fetchCertInfo(company, certNum) {
+  // BRG: direct JSON API
+  if (company === 'BRG') return fetchBrgCertApi(certNum);
   const pageUrl = getCertPageUrl(company, certNum);
   if (!pageUrl) return null;
   try {
@@ -311,7 +313,6 @@ async function fetchCertInfo(company, certNum) {
     const html = data.contents || '';
     if (company === 'PSA') return parsePsaCertHtml(html);
     if (company === 'BGS') return parseBgsCertHtml(html);
-    if (company === 'BRG') return parseBrgCertHtml(html);
     // Generic: try og/meta fallback
     return parseGenericCertHtml(html, company);
   } catch(e) { return null; }
@@ -369,39 +370,37 @@ function parseBgsCertHtml(html) {
 }
 
 function parseBrgCertHtml(html) {
-  const info = {};
-  // Helper to extract field value: "FieldName" followed by value in next element
-  function field(name) {
-    const re = new RegExp(name + '[\\s\\S]{0,200}?(?:<[^>]*>\\s*){1,4}([^<]+)', 'i');
-    const m = html.match(re);
-    return m ? m[1].trim() : '';
-  }
-  const year = field('Year');
-  const set = field('Set');
-  const cardNum = field('Card Number');
-  const player = field('Player Name');
-  const desc = field('Description');
-  const brand = field('Brand');
-  // Build full name: "2024 SCC KOVO KARBON P07 KIM SU JI ON CARD AUTOGRAPH"
-  const parts = [year, set || brand, cardNum, player, desc].filter(Boolean);
-  info.name = parts.join(' ');
-  info.year = year;
-  info.brand = brand;
-  info.subject = player || desc;
-  // Grade: "GradeGEM MINT 10" or "Grade" then value
-  const gradeM = html.match(/Grade\s*(?:<[^>]*>\s*)*([A-Z][A-Z ]+\d+(?:\.\d+)?)/i)
-    || html.match(/Grade[\s\S]{0,100}?([A-Z][A-Z ]*\s*\d+(?:\.\d+)?)/i);
-  if (gradeM) info.gradeLabel = gradeM[1].trim();
-  // Population
-  const popM = html.match(/Population\s*(?:<[^>]*>\s*)*(\d+)/i);
-  if (popM) info.pop = popM[1];
-  // POP Higher
-  const phM = html.match(/POP\s*Higher\s*(?:<[^>]*>\s*)*(\d+)/i);
-  if (phM) info.popHigher = phM[1];
-  // Image: S3 URL
-  const imgM = html.match(/breakncompany\.s3[^"'\s]+itemFront[^"'\s]+/i);
-  if (imgM) info.imageUrl = 'https://' + imgM[0];
-  return info;
+  // Deprecated — BRG now uses direct API via fetchBrgCertApi
+  return null;
+}
+
+// BRG direct JSON API
+async function fetchBrgCertApi(serial) {
+  try {
+    const resp = await fetch('https://gate.break.co.kr/brg/api/gradings/certification/' + serial);
+    if (!resp.ok) return null;
+    const json = await resp.json();
+    if (json.status !== 'success' || !json.data?.cardInfo) return null;
+    const c = json.data.cardInfo;
+    const info = {};
+    const parts = [c.year, c.setName || c.brand, c.cardNumber, c.playerName, c.description].filter(Boolean);
+    info.name = parts.join(' ');
+    info.year = c.year || '';
+    info.brand = c.brand || '';
+    info.subject = c.playerName || c.description || '';
+    info.gradeLabel = (c.scoreText === '10' ? 'GEM MINT ' : '') + (c.scoreText || c.manualScore || '');
+    info.pop = String(json.data.population || 0);
+    info.popHigher = String(json.data.populationHigher || 0);
+    // Front image
+    const front = (c.imageFiles || []).find(f => f.usedAt === 'FRONT_PHOTO');
+    if (front) info.imageUrl = front.url;
+    // Extra fields
+    if (c.cardCategory) info.category = c.cardCategory;
+    if (c.sportsType) info.sportsType = c.sportsType;
+    if (c.limitNumber) info.limitNumber = c.limitNumber;
+    if (c.parallel) info.parallel = c.parallel;
+    return info;
+  } catch(e) { return null; }
 }
 
 function parseGenericCertHtml(html, company) {
