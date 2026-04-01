@@ -374,32 +374,24 @@ function parseBrgCertHtml(html) {
   return null;
 }
 
-// BRG JSON API (via CORS proxy, retry with multiple proxies)
+// BRG JSON API (via CORS proxy — race multiple proxies)
 async function fetchBrgCertApi(serial) {
   const apiUrl = 'https://gate.break.co.kr/brg/api/gradings/certification/' + serial;
-  const proxies = [
-    url => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url),
-    url => 'https://api.allorigins.win/get?url=' + encodeURIComponent(url),
-  ];
+  const tryProxy = async (url, unwrap) => {
+    const resp = await fetch(url, { signal: AbortSignal.timeout(20000) });
+    if (!resp.ok) throw new Error('not ok');
+    const txt = await resp.text();
+    const raw = unwrap ? JSON.parse(txt).contents : txt;
+    if (!raw || !raw.startsWith('{')) throw new Error('bad body');
+    return raw;
+  };
   let rawText = null;
-  for (const mkUrl of proxies) {
-    for (let retry = 0; retry < 2; retry++) {
-      try {
-        const resp = await fetch(mkUrl(apiUrl), { signal: AbortSignal.timeout(12000) });
-        if (!resp.ok) continue;
-        const txt = await resp.text();
-        // /get wraps in {"contents":"..."} — unwrap
-        if (mkUrl === proxies[1]) {
-          try { rawText = JSON.parse(txt).contents; } catch { continue; }
-        } else {
-          rawText = txt;
-        }
-        if (rawText && rawText.startsWith('{')) break;
-        rawText = null;
-      } catch { /* timeout or network error, try next */ }
-    }
-    if (rawText) break;
-  }
+  try {
+    rawText = await Promise.any([
+      tryProxy('https://api.allorigins.win/raw?url=' + encodeURIComponent(apiUrl), false),
+      tryProxy('https://api.allorigins.win/get?url=' + encodeURIComponent(apiUrl), true),
+    ]);
+  } catch { return null; }
   if (!rawText) return null;
   try {
     const json = JSON.parse(rawText);
