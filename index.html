@@ -219,6 +219,21 @@ function getCertPageUrl(company, certNum) {
     default: return null;
   }
 }
+// Fetch cert image → base64 data URL
+function fetchCertImageAsDataUrl(url) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth; c.height = img.naturalHeight;
+      c.getContext('2d').drawImage(img, 0, 0);
+      try { resolve(c.toDataURL('image/jpeg', 0.85)); } catch(e) { resolve(null); }
+    };
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
+}
 function getGradeCompanyFromGrade(grade) {
   if (!grade) return '';
   const match = grade.match(/^(\S+)/);
@@ -1305,6 +1320,7 @@ function CardForm({ card, onSave, onCancel }) {
   const [ocrSuggestion, setOcrSuggestion] = useState('');
   const [certNumber, setCertNumber] = useState(card?.certNumber || '');
   const [certImgOk, setCertImgOk] = useState(false);
+  const [certFetching, setCertFetching] = useState(false);
   const fileRef = useRef(null);
 
   async function handleCropDone(result) {
@@ -1470,6 +1486,17 @@ function CardForm({ card, onSave, onCancel }) {
                   style={{ maxHeight: 180, borderRadius: 8, border: '1px solid #334155' }} />
                 {certImgOk && !photo && (
                   <div style={{ fontSize: 11, color: '#34d399', marginTop: 4 }}>✅ 인증 이미지가 카드 사진으로 사용됩니다</div>
+                )}
+                {certImgOk && (
+                  <button type="button" disabled={certFetching} onClick={async () => {
+                    setCertFetching(true);
+                    const url = getCertImageUrl(gradeCompany, certNumber);
+                    const dataUrl = await fetchCertImageAsDataUrl(url);
+                    if (dataUrl) { setPhoto(dataUrl); } else { alert('이미지를 가져올 수 없습니다. CORS 제한일 수 있어요.'); }
+                    setCertFetching(false);
+                  }} style={{ marginTop: 6, width: '100%', padding: '8px 12px', borderRadius: 8, border: '1px solid #34d399', background: photo ? 'rgba(52,211,153,0.08)' : 'rgba(52,211,153,0.18)', color: '#34d399', fontSize: 12, cursor: 'pointer', fontWeight: 600 }}>
+                    {certFetching ? '⏳ 가져오는 중...' : photo ? '📸 인증 이미지로 사진 교체' : '📸 인증 이미지를 사진으로 저장'}
+                  </button>
                 )}
               </div>
             )}
