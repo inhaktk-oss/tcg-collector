@@ -259,19 +259,26 @@ async function fetchCertImageAsDataUrl(url) {
 // Extract og:image from cert page (for companies without direct image URLs)
 async function fetchOgImageUrl(pageUrl) {
   if (!pageUrl) return null;
+  let html = '';
   try {
-    const resp = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(pageUrl));
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    const html = data.contents || '';
-    const m = html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i)
-      || html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["']/i);
-    if (m) return m[1];
-    // fallback: find first large image in the page
-    const imgs = [...html.matchAll(/<img[^>]*src=["']([^"']+)["'][^>]*/gi)];
-    const slab = imgs.find(i => /cert|slab|label|grade|card/i.test(i[0]) && !/logo|icon|avatar/i.test(i[0]));
-    return slab ? slab[1] : null;
-  } catch(e) { return null; }
+    const tryHtml = async (url, unwrap) => {
+      const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });
+      if (!resp.ok) throw new Error('not ok');
+      const txt = await resp.text();
+      return unwrap ? JSON.parse(txt).contents || '' : txt;
+    };
+    html = await Promise.any([
+      tryHtml('https://cors-get-proxy.sirjosh.workers.dev/?url=' + encodeURIComponent(pageUrl), false),
+      tryHtml('https://api.allorigins.win/get?url=' + encodeURIComponent(pageUrl), true),
+    ]);
+  } catch { return null; }
+  if (!html) return null;
+  const m = html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i)
+    || html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["']/i);
+  if (m) return m[1];
+  const imgs = [...html.matchAll(/<img[^>]*src=["']([^"']+)["'][^>]*/gi)];
+  const slab = imgs.find(i => /cert|slab|label|grade|card/i.test(i[0]) && !/logo|icon|avatar/i.test(i[0]));
+  return slab ? slab[1] : null;
 }
 
 // Master function: fetch cert image for any grading company
@@ -306,16 +313,24 @@ async function fetchCertInfo(company, certNum) {
   if (company === 'BRG') return fetchBrgCertApi(certNum);
   const pageUrl = getCertPageUrl(company, certNum);
   if (!pageUrl) return null;
+  // Race multiple CORS proxies for HTML fetch
+  let html = '';
   try {
-    const resp = await fetch('https://api.allorigins.win/get?url=' + encodeURIComponent(pageUrl));
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    const html = data.contents || '';
-    if (company === 'PSA') return parsePsaCertHtml(html);
-    if (company === 'BGS') return parseBgsCertHtml(html);
-    // Generic: try og/meta fallback
-    return parseGenericCertHtml(html, company);
-  } catch(e) { return null; }
+    const tryHtml = async (url, unwrap) => {
+      const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });
+      if (!resp.ok) throw new Error('not ok');
+      const txt = await resp.text();
+      return unwrap ? JSON.parse(txt).contents || '' : txt;
+    };
+    html = await Promise.any([
+      tryHtml('https://cors-get-proxy.sirjosh.workers.dev/?url=' + encodeURIComponent(pageUrl), false),
+      tryHtml('https://api.allorigins.win/get?url=' + encodeURIComponent(pageUrl), true),
+    ]);
+  } catch { return null; }
+  if (!html) return null;
+  if (company === 'PSA') return parsePsaCertHtml(html);
+  if (company === 'BGS') return parseBgsCertHtml(html);
+  return parseGenericCertHtml(html, company);
 }
 
 function parsePsaCertHtml(html) {
@@ -378,7 +393,7 @@ function parseBrgCertHtml(html) {
 async function fetchBrgCertApi(serial) {
   const apiUrl = 'https://gate.break.co.kr/brg/api/gradings/certification/' + serial;
   const tryProxy = async (url, unwrap) => {
-    const resp = await fetch(url, { signal: AbortSignal.timeout(20000) });
+    const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });
     if (!resp.ok) throw new Error('not ok');
     const txt = await resp.text();
     const raw = unwrap ? JSON.parse(txt).contents : txt;
@@ -388,6 +403,7 @@ async function fetchBrgCertApi(serial) {
   let rawText = null;
   try {
     rawText = await Promise.any([
+      tryProxy('https://cors-get-proxy.sirjosh.workers.dev/?url=' + encodeURIComponent(apiUrl), false),
       tryProxy('https://api.allorigins.win/raw?url=' + encodeURIComponent(apiUrl), false),
       tryProxy('https://api.allorigins.win/get?url=' + encodeURIComponent(apiUrl), true),
     ]);
