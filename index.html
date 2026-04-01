@@ -282,7 +282,15 @@ async function fetchCertPhoto(company, certNumber) {
     const result = await fetchCertImageAsDataUrl(directUrl);
     if (result) return result;
   }
-  // 2) Try og:image from cert page (BGS, SGC, CGC, BRG etc.)
+  // 2) Try BRG S3 image from cert page parsing
+  if (company === 'BRG') {
+    const info = await fetchCertInfo('BRG', certNumber);
+    if (info && info.imageUrl) {
+      const result = await fetchCertImageAsDataUrl(info.imageUrl);
+      if (result) return result;
+    }
+  }
+  // 3) Try og:image from cert page (BGS, SGC, CGC etc.)
   const pageUrl = getCertPageUrl(company, certNumber);
   const ogUrl = await fetchOgImageUrl(pageUrl);
   if (ogUrl) {
@@ -303,6 +311,7 @@ async function fetchCertInfo(company, certNum) {
     const html = data.contents || '';
     if (company === 'PSA') return parsePsaCertHtml(html);
     if (company === 'BGS') return parseBgsCertHtml(html);
+    if (company === 'BRG') return parseBrgCertHtml(html);
     // Generic: try og/meta fallback
     return parseGenericCertHtml(html, company);
   } catch(e) { return null; }
@@ -356,6 +365,42 @@ function parseBgsCertHtml(html) {
   if (gradeM) info.gradeLabel = gradeM[1].trim();
   const popM = html.match(/Population[:\s]*([\d,]+)/i);
   if (popM) info.pop = popM[1].replace(/,/g, '');
+  return info;
+}
+
+function parseBrgCertHtml(html) {
+  const info = {};
+  // Helper to extract field value: "FieldName" followed by value in next element
+  function field(name) {
+    const re = new RegExp(name + '[\\s\\S]{0,200}?(?:<[^>]*>\\s*){1,4}([^<]+)', 'i');
+    const m = html.match(re);
+    return m ? m[1].trim() : '';
+  }
+  const year = field('Year');
+  const set = field('Set');
+  const cardNum = field('Card Number');
+  const player = field('Player Name');
+  const desc = field('Description');
+  const brand = field('Brand');
+  // Build full name: "2024 SCC KOVO KARBON P07 KIM SU JI ON CARD AUTOGRAPH"
+  const parts = [year, set || brand, cardNum, player, desc].filter(Boolean);
+  info.name = parts.join(' ');
+  info.year = year;
+  info.brand = brand;
+  info.subject = player || desc;
+  // Grade: "GradeGEM MINT 10" or "Grade" then value
+  const gradeM = html.match(/Grade\s*(?:<[^>]*>\s*)*([A-Z][A-Z ]+\d+(?:\.\d+)?)/i)
+    || html.match(/Grade[\s\S]{0,100}?([A-Z][A-Z ]*\s*\d+(?:\.\d+)?)/i);
+  if (gradeM) info.gradeLabel = gradeM[1].trim();
+  // Population
+  const popM = html.match(/Population\s*(?:<[^>]*>\s*)*(\d+)/i);
+  if (popM) info.pop = popM[1];
+  // POP Higher
+  const phM = html.match(/POP\s*Higher\s*(?:<[^>]*>\s*)*(\d+)/i);
+  if (phM) info.popHigher = phM[1];
+  // Image: S3 URL
+  const imgM = html.match(/breakncompany\.s3[^"'\s]+itemFront[^"'\s]+/i);
+  if (imgM) info.imageUrl = 'https://' + imgM[0];
   return info;
 }
 
@@ -1627,7 +1672,7 @@ function CardForm({ card, onSave, onCancel }) {
                 setCertInfoLoading(false);
                 if (!info) { alert('카드 정보를 가져올 수 없습니다.'); return; }
                 // Auto-fill fields
-                if (info.name && !name.trim()) setName(info.subject ? info.subject + (info.brand ? ' (' + info.brand + ')' : '') : info.name);
+                if (info.name && !name.trim()) setName(info.name);
                 if (info.gradeLabel) {
                   const scoreM = info.gradeLabel.match(/([\d.]+)\s*$/);
                   if (scoreM) setGradeScore(scoreM[1]);
@@ -1641,14 +1686,14 @@ function CardForm({ card, onSave, onCancel }) {
             {certInfo && (
               <div style={{ marginTop: 8, background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.25)', borderRadius: 10, padding: 12 }}>
                 <div style={{ fontSize: 12, fontWeight: 700, color: '#a5b4fc', marginBottom: 6 }}>📋 {gradeCompany} 인증 정보</div>
-                {certInfo.name && <div style={{ fontSize: 12, color: '#e2e8f0', marginBottom: 4 }}>📛 <strong>{certInfo.subject || certInfo.name}</strong>{certInfo.brand ? <span style={{ color: '#94a3b8' }}> ({certInfo.brand})</span> : ''}</div>}
+                {certInfo.name && <div style={{ fontSize: 12, color: '#e2e8f0', marginBottom: 4 }}>📛 <strong>{certInfo.name}</strong></div>}
                 {certInfo.gradeLabel && <div style={{ fontSize: 12, color: '#e2e8f0', marginBottom: 4 }}>🏅 등급: <strong>{certInfo.gradeLabel}</strong></div>}
                 {certInfo.pop && <div style={{ fontSize: 12, color: '#e2e8f0', marginBottom: 4 }}>📊 POP: <strong>{Number(certInfo.pop).toLocaleString()}</strong>{certInfo.popHigher ? <span style={{ color: '#94a3b8' }}> (상위등급 {Number(certInfo.popHigher).toLocaleString()})</span> : ''}</div>}
                 {certInfo.estimate && <div style={{ fontSize: 12, color: '#34d399', marginBottom: 4 }}>💰 예상가: <strong>${certInfo.estimate}</strong> <span style={{ color: '#94a3b8' }}>(≈ ₩{Math.round(parseFloat(certInfo.estimate) * 1400).toLocaleString('ko-KR')})</span></div>}
                 {certInfo.year && <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 4 }}>📅 연도: {certInfo.year}</div>}
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
-                  {certInfo.name && name.trim() !== (certInfo.subject || certInfo.name) && (
-                    <button type="button" onClick={() => setName(certInfo.subject ? certInfo.subject + (certInfo.brand ? ' (' + certInfo.brand + ')' : '') : certInfo.name)}
+                  {certInfo.name && name.trim() !== certInfo.name && (
+                    <button type="button" onClick={() => setName(certInfo.name)}
                       style={{ padding: '4px 10px', borderRadius: 6, border: '1px solid #475569', background: 'rgba(71,85,105,0.3)', color: '#e2e8f0', fontSize: 11, cursor: 'pointer' }}>카드명 적용</button>
                   )}
                   {certInfo.gradeLabel && (() => { const sm = certInfo.gradeLabel.match(/([\d.]+)\s*$/); return sm && gradeScore !== sm[1] ? (
