@@ -270,13 +270,27 @@ async function fetchOgImageUrl(pageUrl) {
 
 // Master function: fetch cert image for any grading company
 async function fetchCertPhoto(company, certNumber) {
-  // 0) Check if cert cache already has imageUrl (from paste or prior success)
+  // 0) Check if cert cache has imageBase64 (proxy captured) or imageUrl
   const cached = getCachedCertInfo(company, certNumber);
-  if (cached && cached.imageUrl) {
-    const result = await fetchCertImageAsDataUrl(cached.imageUrl);
-    if (result) return result;
+  if (cached) {
+    if (cached.imageBase64) return cached.imageBase64;
+    if (cached.imageUrl) {
+      const result = await fetchCertImageAsDataUrl(cached.imageUrl);
+      if (result) return result;
+    }
   }
-  // 1) Try BRG S3 image from cert page parsing
+  // 1) PSA: try local proxy which captures images directly
+  if (company === 'PSA') {
+    try {
+      const info = await fetchCertInfo(company, certNumber);
+      if (info && info.imageBase64) return info.imageBase64;
+      if (info && info.imageUrl) {
+        const result = await fetchCertImageAsDataUrl(info.imageUrl);
+        if (result) return result;
+      }
+    } catch {}
+  }
+  // 2) Try BRG S3 image from cert page parsing
   if (company === 'BRG') {
     const info = await fetchCertInfo('BRG', certNumber);
     if (info && info.imageUrl) {
@@ -284,15 +298,15 @@ async function fetchCertPhoto(company, certNumber) {
       if (result) return result;
     }
   }
-  // 2) For PSA/BGS etc.: try to get image URL from parsed cert page
-  if (company === 'PSA' || company === 'BGS' || company === 'SGC' || company === 'CGC') {
+  // 3) For BGS/SGC/CGC: try to get image URL from parsed cert page
+  if (company === 'BGS' || company === 'SGC' || company === 'CGC') {
     const info = await fetchCertInfo(company, certNumber);
     if (info && info.imageUrl) {
       const result = await fetchCertImageAsDataUrl(info.imageUrl);
       if (result) return result;
     }
   }
-  // 3) Try og:image from cert page (fallback)
+  // 4) Try og:image from cert page (fallback)
   const pageUrl = getCertPageUrl(company, certNumber);
   const ogUrl = await fetchOgImageUrl(pageUrl);
   if (ogUrl) {
@@ -345,8 +359,10 @@ function getCertCache() {
 }
 function setCertCache(company, certNum, info) {
   try {
+    // imageBase64 is too large for localStorage — strip before caching
+    const { imageBase64, imageBase64_back, ...cacheable } = info || {};
     const cache = getCertCache();
-    cache[company + ':' + certNum] = { info, ts: Date.now() };
+    cache[company + ':' + certNum] = { info: cacheable, ts: Date.now() };
     localStorage.setItem('tcg_cert_cache', JSON.stringify(cache));
   } catch {}
 }
@@ -1842,8 +1858,28 @@ function CardForm({ card, onSave, onCancel }) {
     setPrice(num);
   }
 
+  // 글로벌 이미지 붙여넣기 핸들러 (폼 어디서든 ⌘V로 사진 등록)
+  function handleGlobalPaste(e) {
+    // 텍스트 입력 중이면 무시 (textarea, input[type=text] 등)
+    const tag = e.target?.tagName?.toLowerCase();
+    const isTextInput = tag === 'textarea' || (tag === 'input' && ['text', 'number', 'search', 'url'].includes(e.target.type));
+    if (isTextInput) return;
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        const reader = new FileReader();
+        reader.onload = (ev) => setCropSrc(ev.target.result);
+        reader.readAsDataURL(file);
+        return;
+      }
+    }
+  }
+
   return (
-    <div style={{ maxWidth: 500, margin: '0 auto', padding: 16 }}>
+    <div style={{ maxWidth: 500, margin: '0 auto', padding: 16 }} onPaste={handleGlobalPaste}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
         <button onClick={onCancel} className="text-gray-400" style={{ background: 'none', border: 'none', fontSize: 15, cursor: 'pointer', color: '#94a3b8' }}>← 취소</button>
         <h2 style={{ fontSize: 18, fontWeight: 700 }}>{card ? '카드 수정' : '카드 등록'}</h2>
@@ -1857,15 +1893,47 @@ function CardForm({ card, onSave, onCancel }) {
         {/* Photo */}
         <div style={{ marginBottom: 16, textAlign: 'center' }}>
           {photo ? (
-            <div style={{ position: 'relative', display: 'inline-block' }}>
+            <div style={{ position: 'relative', display: 'inline-block' }}
+              onPaste={(e) => {
+                const items = e.clipboardData?.items;
+                if (!items) return;
+                for (const item of items) {
+                  if (item.type.startsWith('image/')) {
+                    e.preventDefault();
+                    const file = item.getAsFile();
+                    const reader = new FileReader();
+                    reader.onload = (ev) => setCropSrc(ev.target.result);
+                    reader.readAsDataURL(file);
+                    return;
+                  }
+                }
+              }}
+              tabIndex={0}
+            >
               <img src={photo} alt="preview" style={{ maxHeight: 200, borderRadius: 12 }} />
               <button type="button" onClick={() => setPhoto('')} style={{ position: 'absolute', top: 4, right: 4, background: 'rgba(0,0,0,0.6)', color: 'white', border: 'none', borderRadius: '50%', width: 28, height: 28, cursor: 'pointer', fontSize: 14 }}>✕</button>
               <button type="button" onClick={() => fileRef.current?.click()} style={{ position: 'absolute', bottom: 4, right: 4, background: 'rgba(0,0,0,0.6)', color: 'white', border: 'none', borderRadius: 6, padding: '4px 8px', cursor: 'pointer', fontSize: 11 }}>✂️ 다시</button>
             </div>
           ) : (
-            <div onClick={() => fileRef.current?.click()} style={{ background: '#1e293b', border: '2px dashed #334155', borderRadius: 12, padding: '30px 20px', cursor: 'pointer' }}>
+            <div onClick={() => fileRef.current?.click()}
+              onPaste={(e) => {
+                const items = e.clipboardData?.items;
+                if (!items) return;
+                for (const item of items) {
+                  if (item.type.startsWith('image/')) {
+                    e.preventDefault();
+                    const file = item.getAsFile();
+                    const reader = new FileReader();
+                    reader.onload = (ev) => setCropSrc(ev.target.result);
+                    reader.readAsDataURL(file);
+                    return;
+                  }
+                }
+              }}
+              tabIndex={0}
+              style={{ background: '#1e293b', border: '2px dashed #334155', borderRadius: 12, padding: '30px 20px', cursor: 'pointer' }}>
               <div style={{ fontSize: 36, marginBottom: 8 }}>📷</div>
-              <div style={{ fontSize: 13, color: '#64748b' }}>탭하여 사진 추가</div>
+              <div style={{ fontSize: 13, color: '#64748b' }}>탭하여 사진 추가 · 스크린샷 붙여넣기(⌘V)</div>
             </div>
           )}
           <input ref={fileRef} type="file" accept="image/*" onChange={handlePhoto} style={{ display: 'none' }} />
@@ -1964,6 +2032,12 @@ function CardForm({ card, onSave, onCancel }) {
                     if (scoreM) setGradeScore(scoreM[1]);
                   }
                   if (info.estimate) setCurrentValue(Math.round(parseFloat(info.estimate) * 1400).toString());
+                  // Auto-set photo from proxy-captured image
+                  if (!photo && info.imageBase64) setPhoto(info.imageBase64);
+                  else if (!photo && info.imageUrl) {
+                    const dataUrl = await fetchCertImageAsDataUrl(info.imageUrl);
+                    if (dataUrl) setPhoto(dataUrl);
+                  }
                 }} style={{ flex: 1, padding: '10px 12px', borderRadius: 8, border: '1px solid #6366f1', background: 'rgba(99,102,241,0.12)', color: '#a5b4fc', fontSize: 13, cursor: 'pointer', fontWeight: 600 }}>
                   {certInfoLoading ? '⏳ 조회 중...' : '🔎 카드 정보 가져오기'}
                 </button>
@@ -2024,10 +2098,13 @@ function CardForm({ card, onSave, onCancel }) {
                               if (scoreM) setGradeScore(scoreM[1]);
                             }
                             if (parsed.estimate) setCurrentValue(Math.round(parseFloat(parsed.estimate) * 1400).toString());
-                            // Auto-fetch photo if imageUrl was parsed
-                            if (parsed.imageUrl && !photo) {
-                              const dataUrl = await fetchCertImageAsDataUrl(parsed.imageUrl);
-                              if (dataUrl) setPhoto(dataUrl);
+                            // Auto-fetch photo if imageBase64 or imageUrl was parsed
+                            if (!photo) {
+                              if (parsed.imageBase64) { setPhoto(parsed.imageBase64); }
+                              else if (parsed.imageUrl) {
+                                const dataUrl = await fetchCertImageAsDataUrl(parsed.imageUrl);
+                                if (dataUrl) setPhoto(dataUrl);
+                              }
                             }
                           } else {
                             alert('텍스트에서 카드 정보를 찾지 못했습니다.\n페이지 전체를 선택(Ctrl+A)해서 복사해보세요.');

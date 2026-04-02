@@ -111,6 +111,46 @@ async def fetch_psa_cert(cert_number):
             return info;
         }''')
 
+        # 이미지를 프록시 브라우저에서 직접 캡처 (CDN CORS 실패 대비)
+        try:
+            img_data = await page.evaluate('''async () => {
+                const imgs = Array.from(document.querySelectorAll('img'))
+                    .filter(i => i.src.includes('d1htnxwo4o0jhw.cloudfront.net/cert/') && i.naturalWidth > 50);
+                if (imgs.length === 0) return null;
+                const results = {};
+                for (let idx = 0; idx < Math.min(imgs.length, 2); idx++) {
+                    const img = imgs[idx];
+                    // Full-size URL
+                    const fullUrl = img.src.replace('/small/', '/');
+                    try {
+                        const resp = await fetch(fullUrl);
+                        const blob = await resp.blob();
+                        const reader = new FileReader();
+                        const dataUrl = await new Promise((resolve) => {
+                            reader.onload = () => resolve(reader.result);
+                            reader.readAsDataURL(blob);
+                        });
+                        results[idx === 0 ? 'front' : 'back'] = dataUrl;
+                    } catch(e) {
+                        // Fallback: canvas capture from rendered img
+                        try {
+                            const c = document.createElement('canvas');
+                            c.width = img.naturalWidth; c.height = img.naturalHeight;
+                            c.getContext('2d').drawImage(img, 0, 0);
+                            results[idx === 0 ? 'front' : 'back'] = c.toDataURL('image/jpeg', 0.9);
+                        } catch(e2) {}
+                    }
+                }
+                return Object.keys(results).length > 0 ? results : null;
+            }''')
+            if img_data:
+                if img_data.get('front'):
+                    info['imageBase64'] = img_data['front']
+                if img_data.get('back'):
+                    info['imageBase64_back'] = img_data['back']
+        except Exception as e:
+            print(f'  ⚠️ 이미지 캡처 실패: {e}')
+
         return info
 
     except Exception as e:
