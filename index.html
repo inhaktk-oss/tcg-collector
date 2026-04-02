@@ -142,12 +142,26 @@ async function readGistVersion(token, gistId, sha) {
   return raw ? JSON.parse(raw) : null;
 }
 // Merge two card arrays by ID: keep both sides, prefer newer for conflicts
+// Respects deletedCardIds — cards deleted locally won't be resurrected from remote
+function getDeletedCardIds() {
+  try { return JSON.parse(localStorage.getItem('tcg_deleted_ids') || '[]'); } catch { return []; }
+}
+function addDeletedCardIds(ids) {
+  const existing = new Set(getDeletedCardIds());
+  for (const id of ids) existing.add(id);
+  localStorage.setItem('tcg_deleted_ids', JSON.stringify([...existing]));
+}
+function clearDeletedCardIds() {
+  localStorage.removeItem('tcg_deleted_ids');
+}
 function mergeCards(local, remote) {
+  const deletedIds = new Set(getDeletedCardIds());
   const map = new Map();
   // Add all local cards first
   for (const c of local) map.set(c.id, c);
   // Merge remote: if same ID exists, keep the one with newer updatedAt/createdAt
   for (const c of remote) {
+    if (deletedIds.has(c.id)) continue; // Skip cards deleted locally
     const existing = map.get(c.id);
     if (!existing) {
       map.set(c.id, c); // remote-only card → add
@@ -907,6 +921,7 @@ function App() {
   }
   function batchDelete() {
     if (!confirm(selectedIds.size + '장의 카드를 삭제하시겠습니까?')) return;
+    addDeletedCardIds([...selectedIds]);
     setCards(prev => prev.filter(c => !selectedIds.has(c.id)));
     setBatchMode(false); setSelectedIds(new Set());
     scheduleAutoSync();
@@ -988,6 +1003,7 @@ function App() {
       // 5. Push merged result to Gist
       const syncPayload = await buildSyncPayload(merged);
       await writeGist(cfg.token, cfg.gistId, { cards: syncPayload, lastSync: Date.now() });
+      clearDeletedCardIds(); // Deleted cards now removed from Gist too
       setSyncStatus('done');
       setTimeout(() => setSyncStatus(''), 1500);
     } catch(e) {
@@ -1024,6 +1040,7 @@ function App() {
       } catch(e) { /* remote read failed — push local as-is */ }
       const syncPayload = await buildSyncPayload(merged);
       await writeGist(cfg.token, cfg.gistId, { cards: syncPayload, lastSync: Date.now() });
+      clearDeletedCardIds(); // Deleted cards now removed from Gist too
       setSyncStatus('done');
       setTimeout(() => setSyncStatus(''), 1500);
     } catch(e) {
@@ -1111,6 +1128,7 @@ function App() {
     scheduleAutoSync();
   }
   function deleteCard(id) {
+    addDeletedCardIds([id]);
     setCards(prev => prev.filter(c => c.id !== id));
     setSelectedCard(null);
     setShowDeleteConfirm(false);
