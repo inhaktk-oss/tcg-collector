@@ -270,6 +270,12 @@ async function fetchOgImageUrl(pageUrl) {
 
 // Master function: fetch cert image for any grading company
 async function fetchCertPhoto(company, certNumber) {
+  // 0) Check if cert cache already has imageUrl (from paste or prior success)
+  const cached = getCachedCertInfo(company, certNumber);
+  if (cached && cached.imageUrl) {
+    const result = await fetchCertImageAsDataUrl(cached.imageUrl);
+    if (result) return result;
+  }
   // 1) Try BRG S3 image from cert page parsing
   if (company === 'BRG') {
     const info = await fetchCertInfo('BRG', certNumber);
@@ -452,8 +458,28 @@ function parsePsaCertPastedText(text) {
   if (kv.pop) info.pop = kv.pop.replace(/[^0-9]/g, '');
   if (kv.popHigher) info.popHigher = kv.popHigher.replace(/[^0-9]/g, '');
   if (kv.category) info.category = kv.category;
+  // Try to extract image URL from pasted HTML source or embedded URLs
+  const cdnImgs = [...text.matchAll(/https?:\/\/d1htnxwo4o0jhw\.cloudfront\.net\/cert\/[^"'\s)>]+/gi)]
+    .map(m => m[0].replace(/\/small\//, '/'));
+  if (cdnImgs.length > 0) info.imageUrl = cdnImgs[0];
+  if (cdnImgs.length > 1) info.imageUrl2 = cdnImgs[1];
   info._source = 'paste';
   return info;
+}
+
+// Parse pasted content — detects HTML source or plain text automatically
+function parsePsaCertPasted(text) {
+  if (!text || text.length < 20) return null;
+  // If it looks like HTML, parse as HTML first (page source copy)
+  if (text.includes('<html') || text.includes('<meta') || text.includes('cloudfront.net/cert/')) {
+    const htmlResult = parsePsaCertHtml(text);
+    if (htmlResult && Object.keys(htmlResult).length >= 2) {
+      htmlResult._source = 'paste-html';
+      return htmlResult;
+    }
+  }
+  // Otherwise parse as plain text
+  return parsePsaCertPastedText(text);
 }
 
 async function fetchCertInfo(company, certNum) {
@@ -1931,26 +1957,31 @@ function CardForm({ card, onSave, onCancel }) {
                     <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 6, lineHeight: 1.5 }}>
                       ① 위 버튼으로 {gradeCompany} 인증 페이지를 열고<br/>
                       ② 페이지 전체를 선택(Ctrl+A)하고 복사(Ctrl+C)한 뒤<br/>
-                      ③ 아래 입력란에 붙여넣기(Ctrl+V) 하세요
+                      ③ 아래 입력란에 붙여넣기(Ctrl+V) 하세요<br/>
+                      <span style={{ color: '#64748b' }}>💡 페이지 소스 보기(Ctrl+U)에서 HTML을 복사하면 사진도 가져옵니다</span>
                     </div>
                     <textarea
-                      placeholder="PSA 인증 페이지 텍스트를 여기에 붙여넣기..."
+                      placeholder="PSA 인증 페이지 텍스트 또는 HTML 소스를 여기에 붙여넣기..."
                       style={{ width: '100%', height: 100, background: '#0f172a', color: '#e2e8f0', border: '1px solid #475569', borderRadius: 8, padding: 10, fontSize: 12, resize: 'vertical' }}
                       onPaste={(e) => {
-                        setTimeout(() => {
+                        setTimeout(async () => {
                           const txt = e.target.value;
-                          const parsed = parsePsaCertPastedText(txt);
+                          const parsed = parsePsaCertPasted(txt);
                           if (parsed && Object.keys(parsed).length >= 2) {
                             setCertCache(gradeCompany, certNumber, parsed);
                             setCertInfo(parsed);
                             setShowPasteInput(false);
-                            // Auto-fill fields
                             if (parsed.name && !name.trim()) setName(parsed.name);
                             if (parsed.gradeLabel) {
                               const scoreM = parsed.gradeLabel.match(/([\d.]+)\s*$/);
                               if (scoreM) setGradeScore(scoreM[1]);
                             }
                             if (parsed.estimate) setCurrentValue(Math.round(parseFloat(parsed.estimate) * 1400).toString());
+                            // Auto-fetch photo if imageUrl was parsed
+                            if (parsed.imageUrl && !photo) {
+                              const dataUrl = await fetchCertImageAsDataUrl(parsed.imageUrl);
+                              if (dataUrl) setPhoto(dataUrl);
+                            }
                           } else {
                             alert('텍스트에서 카드 정보를 찾지 못했습니다.\n페이지 전체를 선택(Ctrl+A)해서 복사해보세요.');
                           }
