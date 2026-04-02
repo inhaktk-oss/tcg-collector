@@ -159,6 +159,160 @@ async def fetch_psa_cert(cert_number):
         await context.close()
 
 
+async def fetch_cgc_cert(cert_number):
+    """Playwright로 CGC cert 페이지에서 정보 추출 (Turnstile 대기)"""
+    browser = await init_browser()
+    context = await browser.new_context(
+        user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    )
+    page = await context.new_page()
+
+    try:
+        url = f'https://www.cgccards.com/certlookup/{cert_number}'
+        await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+
+        # Turnstile 챌린지 대기 (최대 30초)
+        for i in range(60):
+            # Check if Turnstile challenge is present
+            cf = await page.evaluate('''() => {
+                const body = document.body.innerText || "";
+                return body.includes("Just a moment") || body.includes("Verify you are human")
+                    || !!document.querySelector('iframe[src*="challenges.cloudflare.com"]');
+            }''')
+            if not cf:
+                break
+            # Try clicking Turnstile checkbox if visible
+            if i == 10 or i == 20:
+                try:
+                    frame = page.frame_locator('iframe[src*="challenges.cloudflare.com"]')
+                    await frame.locator('input[type="checkbox"], .cb-lb').click(timeout=2000)
+                except Exception:
+                    pass
+            await asyncio.sleep(0.5)
+        else:
+            return {'error': 'cloudflare', 'message': 'CGC Turnstile challenge timeout'}
+
+        # 페이지 완전 로드 대기
+        await asyncio.sleep(3)
+
+        # 데이터 추출 — CGC cert pages use various layouts
+        info = await page.evaluate('''() => {
+            const info = {};
+            const text = document.body.innerText || "";
+
+            // Method 1: key-value from DOM elements (dt/dd, th/td, label/value pairs)
+            const kv = {};
+            document.querySelectorAll('dt').forEach(dt => {
+                const dd = dt.nextElementSibling;
+                if (dd) kv[dt.textContent.trim()] = dd.textContent.trim();
+            });
+            document.querySelectorAll('th').forEach(th => {
+                const td = th.nextElementSibling;
+                if (td && td.tagName === 'TD') kv[th.textContent.trim()] = td.textContent.trim();
+            });
+
+            // Also scan for label-value class patterns
+            document.querySelectorAll('[class*="label"], [class*="field"], [class*="detail"]').forEach(el => {
+                const label = el.textContent.trim();
+                const sibling = el.nextElementSibling;
+                if (sibling && label.length < 30) kv[label] = sibling.textContent.trim();
+            });
+
+            const map = {
+                'Description': 'description', 'Card Description': 'description', 'Card Name': 'description',
+                'Year': 'year', 'Card Year': 'year',
+                'Grade': 'grade', 'Overall Grade': 'grade', 'CGC Grade': 'grade',
+                'Brand': 'brand', 'Set': 'set',
+                'Card Number': 'cardNumber', 'Card #': 'cardNumber',
+                'Category': 'category', 'Label': 'label', 'Label Type': 'label',
+                'Population': 'pop',
+            };
+
+            for (const [k, v] of Object.entries(kv)) {
+                for (const [label, field] of Object.entries(map)) {
+                    if (k.toLowerCase().includes(label.toLowerCase()) && !info[field]) {
+                        info[field] = v;
+                    }
+                }
+            }
+
+            // Method 2: regex on full text
+            if (!info.grade) {
+                const gm = text.match(/((?:GEM\\s+)?MINT|NEAR\\s+MINT\\+?|PRISTINE|EXCELLENT)\\s+([\\d.]+)/i);
+                if (gm) info.grade = gm[0].trim();
+            }
+            if (!info.year) {
+                const ym = text.match(/Year[:\\s]+(\\d{4})/i);
+                if (ym) info.year = ym[1];
+            }
+
+            // Build name
+            if (info.description) {
+                info.name = info.description;
+            } else {
+                const parts = [info.year, info.brand, info.set, info.cardNumber].filter(Boolean);
+                if (parts.length > 0) info.name = parts.join(' ');
+            }
+            if (info.grade) info.gradeLabel = info.grade;
+            if (info.pop) info.pop = info.pop.replace(/[^0-9]/g, '');
+
+            // Images
+            const imgs = Array.from(document.querySelectorAll('img'))
+                .map(i => i.src)
+                .filter(s => s && !s.includes('logo') && !s.includes('icon') && (s.includes('cgc') || s.includes('cdn') || s.includes('imagedelivery')));
+            if (imgs.length > 0) info.imageUrl = imgs[0];
+            if (imgs.length > 1) info.imageUrl2 = imgs[1];
+
+            info._source = 'cgc-local-proxy';
+            return info;
+        }''')
+
+        # 이미지 캡처 시도
+        try:
+            img_data = await page.evaluate('''async () => {
+                const imgs = Array.from(document.querySelectorAll('img'))
+                    .filter(i => i.src && !i.src.includes('logo') && !i.src.includes('icon')
+                        && i.naturalWidth > 80 && (i.src.includes('cgc') || i.src.includes('cdn') || i.src.includes('imagedelivery')));
+                if (imgs.length === 0) return null;
+                const results = {};
+                for (let idx = 0; idx < Math.min(imgs.length, 2); idx++) {
+                    try {
+                        const resp = await fetch(imgs[idx].src);
+                        const blob = await resp.blob();
+                        const reader = new FileReader();
+                        const dataUrl = await new Promise(resolve => {
+                            reader.onload = () => resolve(reader.result);
+                            reader.readAsDataURL(blob);
+                        });
+                        results[idx === 0 ? 'front' : 'back'] = dataUrl;
+                    } catch(e) {
+                        try {
+                            const c = document.createElement('canvas');
+                            c.width = imgs[idx].naturalWidth; c.height = imgs[idx].naturalHeight;
+                            c.getContext('2d').drawImage(imgs[idx], 0, 0);
+                            results[idx === 0 ? 'front' : 'back'] = c.toDataURL('image/jpeg', 0.9);
+                        } catch(e2) {}
+                    }
+                }
+                return Object.keys(results).length > 0 ? results : null;
+            }''')
+            if img_data:
+                if img_data.get('front'):
+                    info['imageBase64'] = img_data['front']
+                if img_data.get('back'):
+                    info['imageBase64_back'] = img_data['back']
+        except Exception as e:
+            print(f'  ⚠️ CGC 이미지 캡처 실패: {e}')
+
+        return info
+
+    except Exception as e:
+        return {'error': str(e)}
+    finally:
+        await context.close()
+
+
 async def fetch_any_url(target_url):
     """범용 CORS 프록시 — 임의 URL의 HTML 가져오기"""
     browser = await init_browser()
@@ -211,6 +365,18 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 self._json_response({'error': str(e)}, 500)
             return
 
+        # /cgc/{certNumber} — CGC cert 조회
+        m = re.match(r'^/cgc/(\d+)$', path)
+        if m:
+            cert_num = m.group(1)
+            print(f'🃏 CGC cert 조회: {cert_num}')
+            try:
+                info = run_async(fetch_cgc_cert(cert_num))
+                self._json_response(info)
+            except Exception as e:
+                self._json_response({'error': str(e)}, 500)
+            return
+
         # /fetch?url=... — 범용 HTML 프록시
         if path == '/fetch':
             qs = parse_qs(parsed.query)
@@ -237,9 +403,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
         # / — 안내
         self._json_response({
-            'service': 'TCG Collector PSA Proxy',
+            'service': 'TCG Collector Proxy',
             'endpoints': {
                 '/psa/{certNumber}': 'PSA cert 정보 + 이미지 URL (JSON)',
+                '/cgc/{certNumber}': 'CGC cert 정보 + 이미지 URL (JSON)',
                 '/fetch?url=...': '범용 HTML 프록시 (Cloudflare 우회)',
                 '/health': '헬스 체크',
             }
@@ -282,8 +449,9 @@ def main():
 
     # HTTP 서버 시작
     server = HTTPServer(('127.0.0.1', PORT), ProxyHandler)
-    print(f'🌐 PSA 프록시 서버 시작: http://localhost:{PORT}')
+    print(f'🌐 TCG 프록시 서버 시작: http://localhost:{PORT}')
     print(f'   /psa/{{인증번호}} → PSA 카드 정보 조회')
+    print(f'   /cgc/{{인증번호}} → CGC 카드 정보 조회')
     print(f'   /fetch?url=... → 범용 HTML 프록시')
     print(f'   Ctrl+C로 종료')
     print()

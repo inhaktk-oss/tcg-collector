@@ -547,6 +547,112 @@ function parsePsaCertPasted(text) {
   return parsePsaCertPastedText(text);
 }
 
+// --- Parse text pasted from CGC cert page ---
+function parseCgcCertPastedText(text) {
+  if (!text || text.length < 15) return null;
+  const info = {};
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const kv = {};
+
+  // CGC cert pages display fields as label/value pairs
+  const labelMap = {
+    'Cert #': 'certNum', 'Cert Number': 'certNum', 'Certification #': 'certNum', 'Certification Number': 'certNum',
+    'Description': 'description', 'Card Description': 'description', 'Card Name': 'description',
+    'Year': 'year', 'Card Year': 'year',
+    'Grade': 'grade', 'Overall Grade': 'grade', 'CGC Grade': 'grade',
+    'Label': 'label', 'Label Type': 'label',
+    'Category': 'category', 'Card Category': 'category',
+    'Brand': 'brand', 'Set': 'set', 'Card Number': 'cardNumber', 'Card #': 'cardNumber',
+    'Population': 'pop', 'Pop Report': 'pop',
+  };
+
+  // Try "Label\nValue" pattern (consecutive lines) and "Label: Value" pattern
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    for (const [label, key] of Object.entries(labelMap)) {
+      // "Label: Value" on same line
+      if (line.toLowerCase().startsWith(label.toLowerCase() + ':') || line.toLowerCase().startsWith(label.toLowerCase() + '\t')) {
+        const afterLabel = line.slice(label.length).replace(/^[:\s\t]+/, '').trim();
+        if (afterLabel && !kv[key]) kv[key] = afterLabel;
+        break;
+      }
+      // Exact label match → value is next line
+      if (line === label || line.replace(/[:#]/g, '').trim() === label) {
+        if (i + 1 < lines.length && !Object.keys(labelMap).some(l => lines[i+1].replace(/[:#]/g, '').trim() === l)) {
+          if (!kv[key]) kv[key] = lines[i + 1];
+        }
+        break;
+      }
+    }
+  }
+
+  // Inline regex fallbacks
+  const inlinePatterns = [
+    [/Cert(?:ification)?\s*(?:#|Number)[:\s]+(\d+)/i, 'certNum'],
+    [/Description[:\s]+(.+)/i, 'description'],
+    [/(?:CGC\s+)?Grade[:\s]+(.+)/i, 'grade'],
+    [/Year[:\s]+(\d{4})/i, 'year'],
+    [/Brand[:\s]+(.+)/i, 'brand'],
+    [/Card\s*(?:#|Number)[:\s]+(.+)/i, 'cardNumber'],
+    [/Set[:\s]+(.+)/i, 'set'],
+    [/Category[:\s]+(.+)/i, 'category'],
+    [/Pop(?:ulation)?[:\s]*([\d,]+)/i, 'pop'],
+  ];
+  for (const [rx, key] of inlinePatterns) {
+    if (!kv[key]) {
+      const m = text.match(rx);
+      if (m) kv[key] = m[1].trim();
+    }
+  }
+
+  // Detect CGC grade format: "GEM MINT 10", "NEAR MINT+ 8.5", "MINT 9", "PRISTINE 10"
+  if (!kv['grade']) {
+    const gradeM = text.match(/((?:GEM\s+)?MINT|NEAR\s+MINT\+?|PRISTINE|EXCELLENT|VERY\s+GOOD|GOOD|FAIR|POOR)\s+([\d.]+)/i);
+    if (gradeM) kv['grade'] = gradeM[0].trim();
+  }
+
+  if (Object.keys(kv).length < 1) return null;
+
+  // Build name: prefer description, otherwise combine parts
+  if (kv.description) {
+    info.name = kv.description;
+  } else {
+    const nameParts = [kv.year, kv.brand, kv.set, kv.cardNumber, kv.category].filter(v => v && v !== 'N/A');
+    if (nameParts.length > 0) info.name = nameParts.join(' ').trim();
+  }
+  if (kv.year) info.year = kv.year;
+  if (kv.brand) info.brand = kv.brand;
+  if (kv.set) info.set = kv.set;
+  if (kv.grade) info.gradeLabel = kv.grade;
+  if (kv.pop) info.pop = kv.pop.replace(/[^0-9]/g, '');
+  if (kv.category) info.category = kv.category;
+
+  // Try to find image URLs from pasted HTML
+  const cgcImgs = [...text.matchAll(/https?:\/\/[^"'\s)>]*(?:cgccards|cgctradingcards|cgc-cdn|imagedelivery)[^"'\s)>]*\.(?:jpg|jpeg|png|webp)/gi)]
+    .map(m => m[0]);
+  if (cgcImgs.length > 0) info.imageUrl = cgcImgs[0];
+  if (cgcImgs.length > 1) info.imageUrl2 = cgcImgs[1];
+
+  info._source = 'paste';
+  return Object.keys(info).length >= 2 ? info : null;
+}
+
+// Multi-company paste dispatcher
+function parseCertPasted(text, company) {
+  if (!text || text.length < 15) return null;
+  // PSA: use existing detailed parser
+  if (company === 'PSA') return parsePsaCertPasted(text);
+  // CGC: use CGC-specific parser
+  if (company === 'CGC') return parseCgcCertPastedText(text);
+  // Others: try generic label/value extraction
+  // First try PSA parser (works for many formats), then CGC parser
+  const psaResult = parsePsaCertPastedText(text);
+  if (psaResult && Object.keys(psaResult).length >= 2) { psaResult._source = 'paste'; return psaResult; }
+  const cgcResult = parseCgcCertPastedText(text);
+  if (cgcResult) return cgcResult;
+  return null;
+}
+
 async function fetchCertInfo(company, certNum) {
   // 0) Check cache first
   const cached = getCachedCertInfo(company, certNum);
@@ -581,6 +687,21 @@ async function fetchCertInfo(company, certNum) {
     } catch {}
   }
 
+  // CGC: try local proxy (Turnstile may auto-solve)
+  if (company === 'CGC' && _localProxyAvailable !== false) {
+    try {
+      const resp = await fetch(LOCAL_PROXY_BASE + '/cgc/' + certNum.replace(/\D/g, ''), { signal: AbortSignal.timeout(45000) });
+      if (resp.ok) {
+        const cgcResult = await resp.json();
+        _localProxyAvailable = true;
+        if (cgcResult && !cgcResult.error && cgcResult.name) {
+          setCertCache(company, certNum, cgcResult);
+          return cgcResult;
+        }
+      }
+    } catch {}
+  }
+
   // All companies: HTML scraping via CORS proxies
   const pageUrl = getCertPageUrl(company, certNum);
   if (!pageUrl) return null;
@@ -601,6 +722,12 @@ async function fetchCertInfo(company, certNum) {
   else if (company === 'BGS') result = parseBgsCertHtml(html);
   else result = parseGenericCertHtml(html, company);
 
+  // Treat spa-shell / no-data errors as cloudflare (show paste input UI)
+  if (result && (result.error === 'spa-shell' || result.error === 'no-data')) {
+    result = { error: 'cloudflare', pageUrl };
+    setCertCache(company, certNum, result);
+    return result;
+  }
   if (result && !result.error) { setCertCache(company, certNum, result); }
   return result;
 }
@@ -716,14 +843,33 @@ async function fetchBrgCertApi(serial) {
 }
 
 function parseGenericCertHtml(html, company) {
+  // Detect SPA shells (Angular/React) or generic pages with no real cert data
+  if (html.includes('<app-root') || html.includes('ng-app') || html.includes('apiServiceFactory')) {
+    return { error: 'spa-shell', pageUrl: getCertPageUrl(company, '') };
+  }
   const info = {};
   const ogTitle = html.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i)
     || html.match(/<title>([^<]+)<\/title>/i);
-  if (ogTitle) info.name = ogTitle[1].replace(/&amp;/g, '&').replace(/\s*[-|].*$/, '').trim();
+  if (ogTitle) {
+    const t = ogTitle[1].replace(/&amp;/g, '&').replace(/\s*[-|].*$/, '').trim();
+    // Reject generic website titles (not actual card names)
+    if (!/^(CGC|PSA|BGS|SGC|Just a moment|Verify|Certified|Trading Card|Grading|Card Lookup)/i.test(t)) {
+      info.name = t;
+    }
+  }
   const gradeM = html.match(/Grade[:\s]*([\d.]+)/i);
   if (gradeM) info.gradeLabel = company + ' ' + gradeM[1];
   const popM = html.match(/Pop(?:ulation)?[:\s]*([\d,]+)/i);
   if (popM) info.pop = popM[1].replace(/,/g, '');
+  // og:image fallback
+  if (!info.imageUrl) {
+    const ogImg = html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i);
+    if (ogImg && !ogImg[1].includes('logo')) info.imageUrl = ogImg[1];
+  }
+  // If nothing useful was parsed, return error
+  if (!info.name && !info.gradeLabel && !info.pop) {
+    return { error: 'no-data', pageUrl: getCertPageUrl(company, '') };
+  }
   return info;
 }
 function getGradeCompanyFromGrade(grade) {
@@ -2076,10 +2222,14 @@ function CardForm({ card, onSave, onCancel }) {
             {/* Show fetched cert info */}
             {certInfo && certInfo.error === 'cloudflare' && (
               <div style={{ marginTop: 8, background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.3)', borderRadius: 10, padding: 12 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: '#fbbf24', marginBottom: 6 }}>⚠️ {gradeCompany} 자동 조회 일시 불가</div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: '#fbbf24', marginBottom: 6 }}>⚠️ {gradeCompany} 자동 조회 {gradeCompany === 'CGC' ? '불가' : '일시 불가'}</div>
                 <div style={{ fontSize: 11, color: '#d1d5db', marginBottom: 8, lineHeight: 1.5 }}>
-                  보안(Cloudflare) 차단으로 자동 조회가 안 됩니다.
-                  {_localProxyAvailable === false && <><br/><span style={{ color: '#a5b4fc' }}>💡 <strong>psa-proxy.py</strong>를 실행하면 자동 조회가 됩니다: <code style={{ background: '#334155', padding: '2px 6px', borderRadius: 4, fontSize: 10 }}>python3 psa-proxy.py</code></span></>}
+                  {gradeCompany === 'CGC'
+                    ? 'CGC는 Cloudflare Turnstile 보호로 자동 조회가 불가합니다. 아래에서 직접 페이지를 열고 텍스트를 붙여넣어 주세요.'
+                    : <>보안(Cloudflare) 차단으로 자동 조회가 안 됩니다.
+                      {_localProxyAvailable === false && <><br/><span style={{ color: '#a5b4fc' }}>💡 <strong>psa-proxy.py</strong>를 실행하면 자동 조회가 됩니다: <code style={{ background: '#334155', padding: '2px 6px', borderRadius: 4, fontSize: 10 }}>python3 psa-proxy.py</code></span></>}
+                    </>
+                  }
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   <button type="button" onClick={() => window.open(certInfo.pageUrl || getCertPageUrl(gradeCompany, certNumber), '_blank')}
@@ -2100,12 +2250,12 @@ function CardForm({ card, onSave, onCancel }) {
                       <span style={{ color: '#64748b' }}>💡 페이지 소스 보기(Ctrl+U)에서 HTML을 복사하면 사진도 가져옵니다</span>
                     </div>
                     <textarea
-                      placeholder="PSA 인증 페이지 텍스트 또는 HTML 소스를 여기에 붙여넣기..."
+                      placeholder={`${gradeCompany} 인증 페이지 텍스트 또는 HTML 소스를 여기에 붙여넣기...`}
                       style={{ width: '100%', height: 100, background: '#0f172a', color: '#e2e8f0', border: '1px solid #475569', borderRadius: 8, padding: 10, fontSize: 12, resize: 'vertical' }}
                       onPaste={(e) => {
                         setTimeout(async () => {
                           const txt = e.target.value;
-                          const parsed = parsePsaCertPasted(txt);
+                          const parsed = parseCertPasted(txt, gradeCompany);
                           if (parsed && Object.keys(parsed).length >= 2) {
                             setCertCache(gradeCompany, certNumber, parsed);
                             setCertInfo(parsed);
