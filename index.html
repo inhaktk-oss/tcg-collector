@@ -296,7 +296,27 @@ async function fetchCertPhoto(company, certNumber) {
   return null;
 }
 
-// ─── v36: Fetch card info (name, grade, POP, estimate) from cert page ───
+// ─── v37: Cert info with caching + PSA JSON API ───
+
+// --- Cert info cache (localStorage) ---
+function getCertCache() {
+  try { return JSON.parse(localStorage.getItem('tcg_cert_cache') || '{}'); } catch { return {}; }
+}
+function setCertCache(company, certNum, info) {
+  try {
+    const cache = getCertCache();
+    cache[company + ':' + certNum] = { info, ts: Date.now() };
+    localStorage.setItem('tcg_cert_cache', JSON.stringify(cache));
+  } catch {}
+}
+function getCachedCertInfo(company, certNum) {
+  const entry = getCertCache()[company + ':' + certNum];
+  if (!entry || !entry.info) return null;
+  // Cache forever for successful results; skip errors older than 1 hour
+  if (entry.info.error && Date.now() - entry.ts > 3600000) return null;
+  return entry.info;
+}
+
 function isCloudflareChallenge(html) {
   return html.includes('Just a moment') || html.includes('_cf_chl') || html.includes('challenge-platform');
 }
@@ -318,22 +338,94 @@ async function fetchCorsHtml(pageUrl) {
   ]);
 }
 
+// --- PSA JSON API (api.psacard.com — no Cloudflare, 100/day per IP) ---
+async function fetchPsaJsonApi(certNum) {
+  const apiUrl = 'https://api.psacard.com/publicapi/cert/GetByCertNumber/' + certNum;
+  const tryApi = async (url, unwrap) => {
+    const resp = await fetch(url, { signal: AbortSignal.timeout(12000) });
+    if (!resp.ok) throw new Error('not ok');
+    const txt = await resp.text();
+    const raw = unwrap ? JSON.parse(txt).contents : txt;
+    if (!raw || raw.includes('quota exceeded')) throw new Error('quota');
+    return JSON.parse(raw);
+  };
+  const json = await Promise.any([
+    tryApi('https://cors-get-proxy.sirjosh.workers.dev/?url=' + encodeURIComponent(apiUrl), false),
+    tryApi('https://api.allorigins.win/raw?url=' + encodeURIComponent(apiUrl), false),
+    tryApi('https://api.allorigins.win/get?url=' + encodeURIComponent(apiUrl), true),
+    tryApi('https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(apiUrl), false),
+  ]);
+  // PSA API returns: { PSACert: { CertNumber, Year, Brand, CardNumber, Subject, Grade, GradeDescription, ... } }
+  const c = json?.PSACert || json;
+  if (!c || !c.CertNumber) return null;
+  const info = {};
+  const parts = [c.Year, c.Brand, c.CardNumber, c.Subject].filter(Boolean);
+  info.name = parts.join(' ').trim() || c.CardDescription || '';
+  if (c.Year) info.year = c.Year;
+  if (c.Brand) info.brand = c.Brand;
+  if (c.Subject) info.subject = c.Subject;
+  if (c.CardGrade) info.gradeLabel = (c.GradeDescription ? c.GradeDescription + ' ' : '') + c.CardGrade;
+  else if (c.Grade) info.gradeLabel = c.Grade;
+  if (c.PSAEstimate) info.estimate = String(c.PSAEstimate).replace(/[^0-9.]/g, '');
+  if (c.TotalPopulation != null) info.pop = String(c.TotalPopulation);
+  if (c.PopulationHigher != null) info.popHigher = String(c.PopulationHigher);
+  if (c.Category) info.category = c.Category;
+  // PSA API cert images (if available)
+  if (c.CertImageFront) info.imageUrl = c.CertImageFront;
+  else if (c.ImageURL) info.imageUrl = c.ImageURL;
+  if (c.CertImageBack) info.imageUrl2 = c.CertImageBack;
+  info._source = 'psa-api';
+  return info;
+}
+
 async function fetchCertInfo(company, certNum) {
+  // 0) Check cache first
+  const cached = getCachedCertInfo(company, certNum);
+  if (cached) { cached._cached = true; return cached; }
+
+  let result = null;
+
   // BRG: direct JSON API
-  if (company === 'BRG') return fetchBrgCertApi(certNum);
+  if (company === 'BRG') {
+    result = await fetchBrgCertApi(certNum);
+    if (result && !result.error) { setCertCache(company, certNum, result); }
+    return result;
+  }
+
+  // PSA: try JSON API first (no Cloudflare), then HTML scraping fallback
+  if (company === 'PSA') {
+    try {
+      result = await fetchPsaJsonApi(certNum);
+      if (result && !result.error) {
+        setCertCache(company, certNum, result);
+        return result;
+      }
+    } catch {}
+    // Fallback: HTML scraping
+  }
+
+  // All companies: HTML scraping via CORS proxies
   const pageUrl = getCertPageUrl(company, certNum);
   if (!pageUrl) return null;
   let html = '';
   try {
     html = await fetchCorsHtml(pageUrl);
   } catch(err) {
-    // All proxies failed — likely Cloudflare block
-    return { error: 'cloudflare', pageUrl };
+    const errResult = { error: 'cloudflare', pageUrl };
+    setCertCache(company, certNum, errResult);
+    return errResult;
   }
-  if (!html) return { error: 'cloudflare', pageUrl };
-  if (company === 'PSA') return parsePsaCertHtml(html);
-  if (company === 'BGS') return parseBgsCertHtml(html);
-  return parseGenericCertHtml(html, company);
+  if (!html) {
+    const errResult = { error: 'cloudflare', pageUrl };
+    setCertCache(company, certNum, errResult);
+    return errResult;
+  }
+  if (company === 'PSA') result = parsePsaCertHtml(html);
+  else if (company === 'BGS') result = parseBgsCertHtml(html);
+  else result = parseGenericCertHtml(html, company);
+
+  if (result && !result.error) { setCertCache(company, certNum, result); }
+  return result;
 }
 
 function parsePsaCertHtml(html) {
@@ -1706,24 +1798,37 @@ function CardForm({ card, onSave, onCancel }) {
             </div>
             {/* Auto-fetch card info */}
             {certNumber.trim() && getCertPageUrl(gradeCompany, certNumber) && (
-              <button type="button" disabled={certInfoLoading} onClick={async () => {
-                setCertInfoLoading(true);
-                setCertInfo(null);
-                const info = await fetchCertInfo(gradeCompany, certNumber);
-                setCertInfo(info);
-                setCertInfoLoading(false);
-                if (!info) { alert('카드 정보를 가져올 수 없습니다.'); return; }
-                if (info.error === 'cloudflare') return; // UI will show fallback message
-                // Auto-fill fields
-                if (info.name && !name.trim()) setName(info.name);
-                if (info.gradeLabel) {
-                  const scoreM = info.gradeLabel.match(/([\d.]+)\s*$/);
-                  if (scoreM) setGradeScore(scoreM[1]);
-                }
-                if (info.estimate) setCurrentValue(Math.round(parseFloat(info.estimate) * 1400).toString());
-              }} style={{ marginTop: 8, width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #6366f1', background: 'rgba(99,102,241,0.12)', color: '#a5b4fc', fontSize: 13, cursor: 'pointer', fontWeight: 600 }}>
-                {certInfoLoading ? '⏳ 카드 정보 조회 중...' : '🔎 인증번호로 카드 정보 가져오기'}
-              </button>
+              <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                <button type="button" disabled={certInfoLoading} onClick={async () => {
+                  setCertInfoLoading(true);
+                  setCertInfo(null);
+                  const info = await fetchCertInfo(gradeCompany, certNumber);
+                  setCertInfo(info);
+                  setCertInfoLoading(false);
+                  if (!info) { alert('카드 정보를 가져올 수 없습니다.'); return; }
+                  if (info.error === 'cloudflare') return;
+                  if (info.name && !name.trim()) setName(info.name);
+                  if (info.gradeLabel) {
+                    const scoreM = info.gradeLabel.match(/([\d.]+)\s*$/);
+                    if (scoreM) setGradeScore(scoreM[1]);
+                  }
+                  if (info.estimate) setCurrentValue(Math.round(parseFloat(info.estimate) * 1400).toString());
+                }} style={{ flex: 1, padding: '10px 12px', borderRadius: 8, border: '1px solid #6366f1', background: 'rgba(99,102,241,0.12)', color: '#a5b4fc', fontSize: 13, cursor: 'pointer', fontWeight: 600 }}>
+                  {certInfoLoading ? '⏳ 조회 중...' : '🔎 카드 정보 가져오기'}
+                </button>
+                {certInfo && !certInfo.error && (
+                  <button type="button" disabled={certInfoLoading} title="캐시 무시하고 새로 조회" onClick={async () => {
+                    setCertInfoLoading(true);
+                    setCertInfo(null);
+                    try { const cache = getCertCache(); delete cache[gradeCompany + ':' + certNumber]; localStorage.setItem('tcg_cert_cache', JSON.stringify(cache)); } catch {}
+                    const info = await fetchCertInfo(gradeCompany, certNumber);
+                    setCertInfo(info);
+                    setCertInfoLoading(false);
+                  }} style={{ padding: '10px 12px', borderRadius: 8, border: '1px solid #475569', background: 'rgba(71,85,105,0.2)', color: '#94a3b8', fontSize: 13, cursor: 'pointer', fontWeight: 600 }}>
+                    🔄
+                  </button>
+                )}
+              </div>
             )}
             {/* Show fetched cert info */}
             {certInfo && certInfo.error === 'cloudflare' && (
@@ -1741,7 +1846,11 @@ function CardForm({ card, onSave, onCancel }) {
             )}
             {certInfo && !certInfo.error && (
               <div style={{ marginTop: 8, background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.25)', borderRadius: 10, padding: 12 }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: '#a5b4fc', marginBottom: 6 }}>📋 {gradeCompany} 인증 정보</div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: '#a5b4fc', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  📋 {gradeCompany} 인증 정보
+                  {certInfo._cached && <span style={{ fontSize: 10, color: '#64748b', fontWeight: 400 }}>(캐시됨)</span>}
+                  {certInfo._source === 'psa-api' && <span style={{ fontSize: 10, color: '#34d399', fontWeight: 400 }}>(API)</span>}
+                </div>
                 {certInfo.name && <div style={{ fontSize: 12, color: '#e2e8f0', marginBottom: 4 }}>📛 <strong>{certInfo.name}</strong></div>}
                 {certInfo.gradeLabel && <div style={{ fontSize: 12, color: '#e2e8f0', marginBottom: 4 }}>🏅 등급: <strong>{certInfo.gradeLabel}</strong></div>}
                 {certInfo.pop && <div style={{ fontSize: 12, color: '#e2e8f0', marginBottom: 4 }}>📊 POP: <strong>{Number(certInfo.pop).toLocaleString()}</strong>{certInfo.popHigher ? <span style={{ color: '#94a3b8' }}> (상위등급 {Number(certInfo.popHigher).toLocaleString()})</span> : ''}</div>}
