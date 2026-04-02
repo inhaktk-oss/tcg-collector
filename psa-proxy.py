@@ -87,9 +87,14 @@ async def fetch_psa_cert(cert_number):
             if (kv['Category']) info.category = kv['Category'];
             if (kv['Item Grade']) info.gradeLabel = kv['Item Grade'];
             
-            // Build name from parts
-            const parts = [info.year, info.brand, '#' + (info.cardNumber || ''), info.subject].filter(v => v && v !== '#');
-            info.name = parts.join(' ');
+            // Build name — require brand or subject, not just year + number
+            const textFields = [info.brand, info.subject].filter(Boolean);
+            if (textFields.length > 0) {
+                const parts = [info.year, info.brand, '#' + (info.cardNumber || ''), info.subject].filter(v => v && v !== '#');
+                info.name = parts.join(' ');
+            } else {
+                info.name = '';
+            }
             
             // Estimate, Population from header section (bold text on page)
             const text = document.body.innerText;
@@ -247,12 +252,16 @@ async def fetch_cgc_cert(cert_number):
                 if (ym) info.year = ym[1];
             }
 
-            // Build name
+            // Build name (skip if only year/cardNumber — not useful)
             if (info.description) {
                 info.name = info.description;
             } else {
-                const parts = [info.year, info.brand, info.set, info.cardNumber].filter(Boolean);
-                if (parts.length > 0) info.name = parts.join(' ');
+                const textParts = [info.brand, info.set, info.category].filter(Boolean);
+                if (textParts.length > 0) {
+                    const parts = [info.year, ...textParts, info.cardNumber].filter(Boolean);
+                    info.name = parts.join(' ');
+                }
+                // year + cardNumber 만으로는 이름 안 만듦
             }
             if (info.grade) info.gradeLabel = info.grade;
             if (info.pop) info.pop = info.pop.replace(/[^0-9]/g, '');

@@ -442,8 +442,13 @@ async function fetchPsaJsonApi(certNum) {
   const c = json?.PSACert || json;
   if (!c || !c.CertNumber) return null;
   const info = {};
-  const parts = [c.Year, c.Brand, c.CardNumber, c.Subject].filter(Boolean);
-  info.name = parts.join(' ').trim() || c.CardDescription || '';
+  // Build name — require at least brand or subject, not just year + card number
+  const textParts = [c.Brand, c.Subject].filter(Boolean);
+  if (textParts.length > 0) {
+    info.name = [c.Year, c.Brand, c.CardNumber, c.Subject].filter(Boolean).join(' ').trim();
+  } else {
+    info.name = c.CardDescription || '';
+  }
   if (c.Year) info.year = c.Year;
   if (c.Brand) info.brand = c.Brand;
   if (c.Subject) info.subject = c.Subject;
@@ -513,8 +518,12 @@ function parsePsaCertPastedText(text) {
     }
   }
   if (Object.keys(kv).length < 2) return null; // too few fields parsed
-  const nameParts = [kv.year, kv.brand, kv.cardNumber, kv.subject].filter(v => v && v !== 'N/A');
-  info.name = nameParts.join(' ').trim();
+  // Build name — require brand or subject, not just year + card number
+  const textFields = [kv.brand, kv.subject].filter(v => v && v !== 'N/A');
+  if (textFields.length > 0) {
+    info.name = [kv.year, kv.brand, kv.cardNumber, kv.subject].filter(v => v && v !== 'N/A').join(' ').trim();
+  }
+  // year + cardNumber만으로는 이름 안 만듦
   if (kv.year) info.year = kv.year;
   if (kv.brand) info.brand = kv.brand;
   if (kv.subject) info.subject = kv.subject;
@@ -613,12 +622,16 @@ function parseCgcCertPastedText(text) {
 
   if (Object.keys(kv).length < 1) return null;
 
-  // Build name: prefer description, otherwise combine parts
+  // Build name: prefer description, otherwise combine parts (but skip if only year/number)
   if (kv.description) {
     info.name = kv.description;
   } else {
-    const nameParts = [kv.year, kv.brand, kv.set, kv.cardNumber, kv.category].filter(v => v && v !== 'N/A');
-    if (nameParts.length > 0) info.name = nameParts.join(' ').trim();
+    const textParts = [kv.brand, kv.set, kv.category].filter(v => v && v !== 'N/A');
+    if (textParts.length > 0) {
+      const nameParts = [kv.year, ...textParts, kv.cardNumber].filter(Boolean);
+      info.name = nameParts.join(' ').trim();
+    }
+    // year + cardNumber 만으로는 이름 안 만듦 (의미 없음)
   }
   if (kv.year) info.year = kv.year;
   if (kv.brand) info.brand = kv.brand;
@@ -824,8 +837,13 @@ async function fetchBrgCertApi(serial) {
     if (json.status !== 'success' || !json.data?.cardInfo) return null;
     const c = json.data.cardInfo;
     const info = {};
-    const parts = [c.year, c.setName || c.brand, c.cardNumber, c.playerName, c.description].filter(Boolean);
-    info.name = parts.join(' ');
+    // Build name — require meaningful text, not just year + card number
+    const textParts = [c.setName || c.brand, c.playerName, c.description].filter(Boolean);
+    if (textParts.length > 0) {
+      info.name = [c.year, c.setName || c.brand, c.cardNumber, c.playerName, c.description].filter(Boolean).join(' ');
+    } else {
+      info.name = '';
+    }
     info.year = c.year || '';
     info.brand = c.brand || '';
     info.subject = c.playerName || c.description || '';
