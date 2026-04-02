@@ -154,6 +154,22 @@ function addDeletedCardIds(ids) {
 function clearDeletedCardIds() {
   localStorage.removeItem('tcg_deleted_ids');
 }
+function getLastSyncTime() {
+  try { return parseInt(localStorage.getItem('tcg_last_sync') || '0'); } catch { return 0; }
+}
+function setLastSyncTime() {
+  localStorage.setItem('tcg_last_sync', String(Date.now()));
+}
+// Remove cards deleted on another device: local-only cards older than lastSync
+function removeRemotelyDeleted(merged, remoteIds, lastSync) {
+  if (!lastSync) return merged; // First sync — keep everything
+  return merged.filter(c => {
+    if (remoteIds.has(c.id)) return true; // Exists in remote → keep
+    // Local-only: keep if created/updated after last sync (new local card)
+    const cardTime = Math.max(c.updatedAt || 0, c.createdAt || 0);
+    return cardTime > lastSync;
+  });
+}
 function mergeCards(local, remote) {
   const deletedIds = new Set(getDeletedCardIds());
   const map = new Map();
@@ -1163,13 +1179,17 @@ function App() {
         return { ...data, photo: localPhotoMap.get(c.id) || syncPhoto || '' };
       });
       // 3. Merge: keep all cards from both sides, prefer newer for conflicts
-      const merged = mergeCards(localCards, remoteWithPhotos);
+      const remoteIdSet = new Set(remoteCards.map(c => c.id));
+      let merged = mergeCards(localCards, remoteWithPhotos);
+      // 3b. Detect cards deleted on other devices
+      merged = removeRemotelyDeleted(merged, remoteIdSet, getLastSyncTime());
       // 4. Save to localStorage + React state FIRST (before push)
       saveMergedCards(merged);
       // 5. Push merged result to Gist
       const syncPayload = await buildSyncPayload(merged);
       await writeGist(cfg.token, cfg.gistId, { cards: syncPayload, lastSync: Date.now() });
       clearDeletedCardIds(); // Deleted cards now removed from Gist too
+      setLastSyncTime();
       setSyncStatus('done');
       setTimeout(() => setSyncStatus(''), 1500);
     } catch(e) {
@@ -1200,13 +1220,16 @@ function App() {
             const { syncPhoto, ...data } = c;
             return { ...data, photo: localPhotoMap.get(c.id) || syncPhoto || '' };
           });
+          const remoteIdSet = new Set(remoteCards.map(c => c.id));
           merged = mergeCards(localCards, remoteWithPhotos);
+          merged = removeRemotelyDeleted(merged, remoteIdSet, getLastSyncTime());
           saveMergedCards(merged);
         }
       } catch(e) { /* remote read failed — push local as-is */ }
       const syncPayload = await buildSyncPayload(merged);
       await writeGist(cfg.token, cfg.gistId, { cards: syncPayload, lastSync: Date.now() });
       clearDeletedCardIds(); // Deleted cards now removed from Gist too
+      setLastSyncTime();
       setSyncStatus('done');
       setTimeout(() => setSyncStatus(''), 1500);
     } catch(e) {
@@ -1238,8 +1261,12 @@ function App() {
         const { syncPhoto, ...data } = c;
         return { ...data, photo: localPhotoMap.get(c.id) || syncPhoto || '' };
       });
-      const merged = mergeCards(localCards, remoteWithPhotos);
+      const remoteIdSet = new Set(remoteCards.map(c => c.id));
+      let merged = mergeCards(localCards, remoteWithPhotos);
+      // Detect cards deleted on other devices
+      merged = removeRemotelyDeleted(merged, remoteIdSet, getLastSyncTime());
       saveMergedCards(merged);
+      setLastSyncTime();
       if (!silent) { setSyncStatus('done'); setTimeout(() => setSyncStatus(''), 1500); }
     } catch(e) {
       console.error('Pull error:', e);
@@ -1257,8 +1284,16 @@ function App() {
     }
     switch (sort) {
       case 'oldest': list.sort((a, b) => a.createdAt - b.createdAt); break;
-      case 'buy-newest': list.sort((a, b) => (b.purchaseDate || '').localeCompare(a.purchaseDate || '')); break;
-      case 'buy-oldest': list.sort((a, b) => (a.purchaseDate || '').localeCompare(b.purchaseDate || '')); break;
+      case 'buy-newest': list.sort((a, b) => {
+        if (!a.purchaseDate && !b.purchaseDate) return 0;
+        if (!a.purchaseDate) return 1; if (!b.purchaseDate) return -1;
+        return b.purchaseDate.localeCompare(a.purchaseDate);
+      }); break;
+      case 'buy-oldest': list.sort((a, b) => {
+        if (!a.purchaseDate && !b.purchaseDate) return 0;
+        if (!a.purchaseDate) return 1; if (!b.purchaseDate) return -1;
+        return a.purchaseDate.localeCompare(b.purchaseDate);
+      }); break;
       case 'price-high': list.sort((a, b) => (b.price || 0) - (a.price || 0)); break;
       case 'price-low': list.sort((a, b) => (a.price || 0) - (b.price || 0)); break;
       case 'value-high': list.sort((a, b) => (b.currentValue || 0) - (a.currentValue || 0)); break;
