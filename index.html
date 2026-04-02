@@ -302,7 +302,33 @@ async function fetchCertPhoto(company, certNumber) {
   return null;
 }
 
-// ─── v38: Cert info — cache + PSA API + paste parser + personal proxy ───
+// ─── v39: Cert info — cache + local proxy + PSA API + paste + personal proxy ───
+
+// --- Local Playwright proxy (psa-proxy.py on localhost:8878) ---
+const LOCAL_PROXY_PORT = 8878;
+const LOCAL_PROXY_BASE = 'http://localhost:' + LOCAL_PROXY_PORT;
+let _localProxyAvailable = null; // null=unknown, true/false
+
+async function checkLocalProxy() {
+  try {
+    const r = await fetch(LOCAL_PROXY_BASE + '/health', { signal: AbortSignal.timeout(2000) });
+    if (r.ok) { _localProxyAvailable = true; return true; }
+  } catch {}
+  _localProxyAvailable = false;
+  return false;
+}
+
+async function fetchPsaLocalProxy(certNum) {
+  if (_localProxyAvailable === false) throw new Error('local proxy unavailable');
+  if (_localProxyAvailable === null) {
+    if (!await checkLocalProxy()) throw new Error('local proxy unavailable');
+  }
+  const resp = await fetch(LOCAL_PROXY_BASE + '/psa/' + certNum, { signal: AbortSignal.timeout(45000) });
+  if (!resp.ok) throw new Error('proxy error ' + resp.status);
+  const info = await resp.json();
+  if (info.error) throw new Error(info.error);
+  return info;
+}
 
 // --- Personal CORS proxy URL (user-configurable in Settings) ---
 function getPersonalProxyUrl() {
@@ -358,7 +384,16 @@ async function fetchCorsHtml(pageUrl) {
     return html;
   };
   const proxies = buildProxyUrls(pageUrl);
-  return Promise.any(proxies.map(p => tryHtml(p.url, p.unwrap)));
+  const promises = proxies.map(p => tryHtml(p.url, p.unwrap));
+  // Also try local proxy if available
+  if (_localProxyAvailable !== false) {
+    promises.push(
+      fetch(LOCAL_PROXY_BASE + '/fetch?url=' + encodeURIComponent(pageUrl), { signal: AbortSignal.timeout(40000) })
+        .then(r => { if (!r.ok) throw new Error('not ok'); return r.text(); })
+        .then(html => { if (isCloudflareChallenge(html)) throw new Error('cloudflare'); _localProxyAvailable = true; return html; })
+    );
+  }
+  return Promise.any(promises);
 }
 
 // --- PSA JSON API (api.psacard.com — no Cloudflare, 100/day per IP) ---
@@ -496,8 +531,17 @@ async function fetchCertInfo(company, certNum) {
     return result;
   }
 
-  // PSA: try JSON API first (no Cloudflare), then HTML scraping fallback
+  // PSA: try local proxy → JSON API → HTML scraping
   if (company === 'PSA') {
+    // 1) Local Playwright proxy (100% reliable when running)
+    try {
+      result = await fetchPsaLocalProxy(certNum);
+      if (result && !result.error) {
+        setCertCache(company, certNum, result);
+        return result;
+      }
+    } catch {}
+    // 2) PSA JSON API (no Cloudflare, 100/day quota)
     try {
       result = await fetchPsaJsonApi(certNum);
       if (result && !result.error) {
@@ -789,6 +833,9 @@ function App() {
   const [theme, setTheme] = useState(() => localStorage.getItem('tcg_theme') || 'dark');
   const [batchMode, setBatchMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState(new Set());
+
+  // Check local proxy on mount
+  useEffect(() => { checkLocalProxy(); }, []);
   const [compareIds, setCompareIds] = useState([]);
   const [syncStatus, setSyncStatus] = useState('');
   const syncTimer = useRef(null);
@@ -1939,8 +1986,8 @@ function CardForm({ card, onSave, onCancel }) {
               <div style={{ marginTop: 8, background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.3)', borderRadius: 10, padding: 12 }}>
                 <div style={{ fontSize: 12, fontWeight: 700, color: '#fbbf24', marginBottom: 6 }}>⚠️ {gradeCompany} 자동 조회 일시 불가</div>
                 <div style={{ fontSize: 11, color: '#d1d5db', marginBottom: 8, lineHeight: 1.5 }}>
-                  보안(Cloudflare) 차단으로 자동 조회가 안 됩니다.<br/>
-                  아래에서 <strong>직접 조회 → 텍스트 붙여넣기</strong>로 정보를 가져올 수 있어요.
+                  보안(Cloudflare) 차단으로 자동 조회가 안 됩니다.
+                  {_localProxyAvailable === false && <><br/><span style={{ color: '#a5b4fc' }}>💡 <strong>psa-proxy.py</strong>를 실행하면 자동 조회가 됩니다: <code style={{ background: '#334155', padding: '2px 6px', borderRadius: 4, fontSize: 10 }}>python3 psa-proxy.py</code></span></>}
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   <button type="button" onClick={() => window.open(certInfo.pageUrl || getCertPageUrl(gradeCompany, certNumber), '_blank')}
