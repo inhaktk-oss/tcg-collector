@@ -296,7 +296,16 @@ async function fetchCertPhoto(company, certNumber) {
   return null;
 }
 
-// ─── v37: Cert info with caching + PSA JSON API ───
+// ─── v38: Cert info — cache + PSA API + paste parser + personal proxy ───
+
+// --- Personal CORS proxy URL (user-configurable in Settings) ---
+function getPersonalProxyUrl() {
+  return localStorage.getItem('tcg_personal_proxy') || '';
+}
+function setPersonalProxyUrl(url) {
+  if (url) localStorage.setItem('tcg_personal_proxy', url.replace(/\/+$/, ''));
+  else localStorage.removeItem('tcg_personal_proxy');
+}
 
 // --- Cert info cache (localStorage) ---
 function getCertCache() {
@@ -312,13 +321,25 @@ function setCertCache(company, certNum, info) {
 function getCachedCertInfo(company, certNum) {
   const entry = getCertCache()[company + ':' + certNum];
   if (!entry || !entry.info) return null;
-  // Cache forever for successful results; skip errors older than 1 hour
   if (entry.info.error && Date.now() - entry.ts > 3600000) return null;
   return entry.info;
 }
 
 function isCloudflareChallenge(html) {
   return html.includes('Just a moment') || html.includes('_cf_chl') || html.includes('challenge-platform');
+}
+
+// Build proxy URL list (personal proxy first if configured)
+function buildProxyUrls(targetUrl, mode) {
+  const encoded = encodeURIComponent(targetUrl);
+  const proxies = [];
+  const personal = getPersonalProxyUrl();
+  if (personal) proxies.push({ url: personal + '/' + encoded, unwrap: false });
+  proxies.push({ url: 'https://cors-get-proxy.sirjosh.workers.dev/?url=' + encoded, unwrap: false });
+  proxies.push({ url: 'https://api.allorigins.win/get?url=' + encoded, unwrap: true });
+  proxies.push({ url: 'https://api.allorigins.win/raw?url=' + encoded, unwrap: false });
+  proxies.push({ url: 'https://api.codetabs.com/v1/proxy?quest=' + encoded, unwrap: false });
+  return proxies;
 }
 
 async function fetchCorsHtml(pageUrl) {
@@ -330,12 +351,8 @@ async function fetchCorsHtml(pageUrl) {
     if (isCloudflareChallenge(html)) throw new Error('cloudflare');
     return html;
   };
-  return Promise.any([
-    tryHtml('https://cors-get-proxy.sirjosh.workers.dev/?url=' + encodeURIComponent(pageUrl), false),
-    tryHtml('https://api.allorigins.win/get?url=' + encodeURIComponent(pageUrl), true),
-    tryHtml('https://api.allorigins.win/raw?url=' + encodeURIComponent(pageUrl), false),
-    tryHtml('https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(pageUrl), false),
-  ]);
+  const proxies = buildProxyUrls(pageUrl);
+  return Promise.any(proxies.map(p => tryHtml(p.url, p.unwrap)));
 }
 
 // --- PSA JSON API (api.psacard.com — no Cloudflare, 100/day per IP) ---
@@ -349,13 +366,8 @@ async function fetchPsaJsonApi(certNum) {
     if (!raw || raw.includes('quota exceeded')) throw new Error('quota');
     return JSON.parse(raw);
   };
-  const json = await Promise.any([
-    tryApi('https://cors-get-proxy.sirjosh.workers.dev/?url=' + encodeURIComponent(apiUrl), false),
-    tryApi('https://api.allorigins.win/raw?url=' + encodeURIComponent(apiUrl), false),
-    tryApi('https://api.allorigins.win/get?url=' + encodeURIComponent(apiUrl), true),
-    tryApi('https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(apiUrl), false),
-  ]);
-  // PSA API returns: { PSACert: { CertNumber, Year, Brand, CardNumber, Subject, Grade, GradeDescription, ... } }
+  const proxies = buildProxyUrls(apiUrl);
+  const json = await Promise.any(proxies.map(p => tryApi(p.url, p.unwrap)));
   const c = json?.PSACert || json;
   if (!c || !c.CertNumber) return null;
   const info = {};
@@ -370,11 +382,77 @@ async function fetchPsaJsonApi(certNum) {
   if (c.TotalPopulation != null) info.pop = String(c.TotalPopulation);
   if (c.PopulationHigher != null) info.popHigher = String(c.PopulationHigher);
   if (c.Category) info.category = c.Category;
-  // PSA API cert images (if available)
   if (c.CertImageFront) info.imageUrl = c.CertImageFront;
   else if (c.ImageURL) info.imageUrl = c.ImageURL;
   if (c.CertImageBack) info.imageUrl2 = c.CertImageBack;
   info._source = 'psa-api';
+  return info;
+}
+
+// --- Parse text pasted from PSA cert page ---
+function parsePsaCertPastedText(text) {
+  if (!text || text.length < 20) return null;
+  const info = {};
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  // Key-value pattern: "Label   Value" or "Label: Value"
+  const kv = {};
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    // PSA page uses table layout: "Year\n1999\nBrand/Title\nPOKEMON..." 
+    // So look for known labels and take the next non-label line as value
+    const labelMap = {
+      'Year': 'year', 'Brand/Title': 'brand', 'Brand / Title': 'brand', 'Brand': 'brand',
+      'Card Number': 'cardNumber', 'Card #': 'cardNumber',
+      'Subject': 'subject', 'Player': 'subject',
+      'Variety/Pedigree': 'variety', 'Variety': 'variety',
+      'Item Grade': 'grade', 'Grade': 'grade', 'ITEM GRADE': 'grade',
+      'Cert Number': 'certNum', 'Cert #': 'certNum', 'CERT #': 'certNum',
+      'PSA Estimate': 'estimate', 'PSA ESTIMATE': 'estimate', 'Estimate': 'estimate',
+      'PSA Population': 'pop', 'PSA POPULATION': 'pop', 'Population': 'pop',
+      'Pop Higher': 'popHigher', 'POP HIGHER': 'popHigher', 'Pop. Higher': 'popHigher',
+      'Category': 'category',
+    };
+    for (const [label, key] of Object.entries(labelMap)) {
+      if (line === label || line.startsWith(label + ':') || line.startsWith(label + '\t')) {
+        // Value might be on same line after label or on next line
+        const afterLabel = line.slice(label.length).replace(/^[:\s]+/, '').trim();
+        if (afterLabel) { kv[key] = afterLabel; }
+        else if (i + 1 < lines.length && !Object.keys(labelMap).some(l => lines[i+1] === l || lines[i+1].startsWith(l + ':'))) {
+          kv[key] = lines[i + 1];
+        }
+        break;
+      }
+    }
+  }
+  // Also try inline "Year: 1999" or "Brand/Title: POKEMON" patterns
+  const inlinePatterns = [
+    [/Year[:\s]+(\d{4})/i, 'year'],
+    [/Brand(?:\/Title)?[:\s]+(.+)/i, 'brand'],
+    [/Card\s*(?:Number|#)[:\s]+(.+)/i, 'cardNumber'],
+    [/Subject[:\s]+(.+)/i, 'subject'],
+    [/(?:Item\s+)?Grade[:\s]+(.+)/i, 'grade'],
+    [/(?:PSA\s+)?Estimate[:\s]*\$?([\d,.]+)/i, 'estimate'],
+    [/(?:PSA\s+)?Population[:\s]*([\d,.]+)/i, 'pop'],
+    [/Pop(?:\.)?\s*Higher[:\s]*([\d,.]+)/i, 'popHigher'],
+  ];
+  for (const [rx, key] of inlinePatterns) {
+    if (!kv[key]) {
+      const m = text.match(rx);
+      if (m) kv[key] = m[1].trim();
+    }
+  }
+  if (Object.keys(kv).length < 2) return null; // too few fields parsed
+  const nameParts = [kv.year, kv.brand, kv.cardNumber, kv.subject].filter(v => v && v !== 'N/A');
+  info.name = nameParts.join(' ').trim();
+  if (kv.year) info.year = kv.year;
+  if (kv.brand) info.brand = kv.brand;
+  if (kv.subject) info.subject = kv.subject;
+  if (kv.grade) info.gradeLabel = kv.grade;
+  if (kv.estimate) info.estimate = kv.estimate.replace(/[^0-9.]/g, '');
+  if (kv.pop) info.pop = kv.pop.replace(/[^0-9]/g, '');
+  if (kv.popHigher) info.popHigher = kv.popHigher.replace(/[^0-9]/g, '');
+  if (kv.category) info.category = kv.category;
+  info._source = 'paste';
   return info;
 }
 
@@ -401,7 +479,6 @@ async function fetchCertInfo(company, certNum) {
         return result;
       }
     } catch {}
-    // Fallback: HTML scraping
   }
 
   // All companies: HTML scraping via CORS proxies
@@ -1638,6 +1715,7 @@ function CardForm({ card, onSave, onCancel }) {
   const [certFetching, setCertFetching] = useState(false);
   const [certInfo, setCertInfo] = useState(null);
   const [certInfoLoading, setCertInfoLoading] = useState(false);
+  const [showPasteInput, setShowPasteInput] = useState(false);
   const fileRef = useRef(null);
 
   async function handleCropDone(result) {
@@ -1835,13 +1913,52 @@ function CardForm({ card, onSave, onCancel }) {
               <div style={{ marginTop: 8, background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.3)', borderRadius: 10, padding: 12 }}>
                 <div style={{ fontSize: 12, fontWeight: 700, color: '#fbbf24', marginBottom: 6 }}>⚠️ {gradeCompany} 자동 조회 일시 불가</div>
                 <div style={{ fontSize: 11, color: '#d1d5db', marginBottom: 8, lineHeight: 1.5 }}>
-                  {gradeCompany} 사이트의 보안(Cloudflare)으로 인해 자동 조회가 차단되었습니다.<br/>
-                  아래 버튼으로 직접 조회 페이지를 열어 정보를 확인해주세요.
+                  보안(Cloudflare) 차단으로 자동 조회가 안 됩니다.<br/>
+                  아래에서 <strong>직접 조회 → 텍스트 붙여넣기</strong>로 정보를 가져올 수 있어요.
                 </div>
-                <button type="button" onClick={() => window.open(certInfo.pageUrl || getCertPageUrl(gradeCompany, certNumber), '_blank')}
-                  style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #6366f1', background: 'rgba(99,102,241,0.15)', color: '#a5b4fc', fontSize: 12, cursor: 'pointer', fontWeight: 600 }}>
-                  🔗 {gradeCompany} 인증 페이지에서 직접 확인
-                </button>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                  <button type="button" onClick={() => window.open(certInfo.pageUrl || getCertPageUrl(gradeCompany, certNumber), '_blank')}
+                    style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #6366f1', background: 'rgba(99,102,241,0.15)', color: '#a5b4fc', fontSize: 12, cursor: 'pointer', fontWeight: 600 }}>
+                    🔗 {gradeCompany} 인증 페이지 열기
+                  </button>
+                  <button type="button" onClick={() => setShowPasteInput(!showPasteInput)}
+                    style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #34d399', background: showPasteInput ? 'rgba(52,211,153,0.2)' : 'rgba(52,211,153,0.08)', color: '#34d399', fontSize: 12, cursor: 'pointer', fontWeight: 600 }}>
+                    📋 텍스트 붙여넣기로 입력
+                  </button>
+                </div>
+                {showPasteInput && (
+                  <div style={{ marginTop: 10 }}>
+                    <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 6, lineHeight: 1.5 }}>
+                      ① 위 버튼으로 {gradeCompany} 인증 페이지를 열고<br/>
+                      ② 페이지 전체를 선택(Ctrl+A)하고 복사(Ctrl+C)한 뒤<br/>
+                      ③ 아래 입력란에 붙여넣기(Ctrl+V) 하세요
+                    </div>
+                    <textarea
+                      placeholder="PSA 인증 페이지 텍스트를 여기에 붙여넣기..."
+                      style={{ width: '100%', height: 100, background: '#0f172a', color: '#e2e8f0', border: '1px solid #475569', borderRadius: 8, padding: 10, fontSize: 12, resize: 'vertical' }}
+                      onPaste={(e) => {
+                        setTimeout(() => {
+                          const txt = e.target.value;
+                          const parsed = parsePsaCertPastedText(txt);
+                          if (parsed && Object.keys(parsed).length >= 2) {
+                            setCertCache(gradeCompany, certNumber, parsed);
+                            setCertInfo(parsed);
+                            setShowPasteInput(false);
+                            // Auto-fill fields
+                            if (parsed.name && !name.trim()) setName(parsed.name);
+                            if (parsed.gradeLabel) {
+                              const scoreM = parsed.gradeLabel.match(/([\d.]+)\s*$/);
+                              if (scoreM) setGradeScore(scoreM[1]);
+                            }
+                            if (parsed.estimate) setCurrentValue(Math.round(parseFloat(parsed.estimate) * 1400).toString());
+                          } else {
+                            alert('텍스트에서 카드 정보를 찾지 못했습니다.\n페이지 전체를 선택(Ctrl+A)해서 복사해보세요.');
+                          }
+                        }, 100);
+                      }}
+                    />
+                  </div>
+                )}
               </div>
             )}
             {certInfo && !certInfo.error && (
@@ -2327,6 +2444,43 @@ function SyncScreen({ onBack, onSync, onPush, onPull, onRestore, cardCount }) {
             </div>
           );
         })()}
+      </div>
+
+      {/* Personal CORS Proxy */}
+      <div style={{ background: '#1e293b', borderRadius: 12, padding: 16, marginBottom: 16, border: '1px solid #334155' }}>
+        <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 8 }}>🌐 개인 CORS 프록시 (선택)</h3>
+        <p style={{ fontSize: 12, color: '#94a3b8', marginBottom: 8, lineHeight: 1.5 }}>
+          PSA/BGS 등 Cloudflare로 보호되는 사이트의 자동 조회를 안정적으로 사용하려면<br/>
+          개인 CORS 프록시 URL을 입력하세요. 없으면 공유 프록시를 사용합니다.
+        </p>
+        <input type="text" value={(() => getPersonalProxyUrl())()}
+          placeholder="예: https://my-cors-proxy.username.workers.dev"
+          onChange={e => { setPersonalProxyUrl(e.target.value.trim()); setStatus('✅ 프록시 URL 저장됨'); }}
+          style={{ marginBottom: 8 }} />
+        <div style={{ fontSize: 11, color: '#64748b', lineHeight: 1.6 }}>
+          <strong>프록시 배포 방법 (무료, 2분):</strong><br/>
+          1. <a href="https://workers.cloudflare.com" target="_blank" style={{ color: '#a5b4fc' }}>workers.cloudflare.com</a>에서 무료 가입<br/>
+          2. Worker 생성 → 아래 코드를 붙여넣고 배포<br/>
+          3. 배포된 URL을 위에 입력
+        </div>
+        <details style={{ marginTop: 8 }}>
+          <summary style={{ fontSize: 12, color: '#a5b4fc', cursor: 'pointer' }}>📋 Cloudflare Worker 코드 보기</summary>
+          <pre style={{ marginTop: 6, padding: 10, background: '#0f172a', borderRadius: 6, fontSize: 10, color: '#94a3b8', overflowX: 'auto', whiteSpace: 'pre-wrap', lineHeight: 1.5, border: '1px solid #334155' }}>{`export default {
+  async fetch(request) {
+    const url = new URL(request.url);
+    const target = decodeURIComponent(url.pathname.slice(1));
+    if (!target.startsWith('http')) {
+      return new Response('Usage: /https://example.com/path', { status: 400 });
+    }
+    const resp = await fetch(target, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+    });
+    const headers = new Headers(resp.headers);
+    headers.set('Access-Control-Allow-Origin', '*');
+    return new Response(resp.body, { status: resp.status, headers });
+  }
+};`}</pre>
+        </details>
       </div>
 
       <div style={{ marginTop: 20, padding: 12, background: '#0f172a', borderRadius: 8, fontSize: 12, color: '#64748b', lineHeight: 1.8 }}>
