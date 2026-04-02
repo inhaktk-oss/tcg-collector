@@ -198,13 +198,9 @@ const GRADE_SCORES = [10, 9.5, 9, 8.5, 8, 7.5, 7, 6.5, 6, 5.5, 5, 4.5, 4, 3.5, 3
 
 // ─── v32: Cert Lookup for Graded Cards ───
 function getCertImageUrl(company, certNum) {
-  if (!certNum) return null;
-  const n = certNum.replace(/\D/g, '');
-  if (!n) return null;
-  switch (company) {
-    case 'PSA': return `https://d1htnxwo4o0jhw.cloudfront.net/cert/${n}/${n}_1.jpg`;
-    default: return null;
-  }
+  // PSA changed their image URL pattern — cert images now use internal IDs + hash filenames.
+  // Image URLs can only be extracted from the cert page HTML.
+  return null;
 }
 function getCertPageUrl(company, certNum) {
   if (!certNum) return null;
@@ -261,16 +257,7 @@ async function fetchOgImageUrl(pageUrl) {
   if (!pageUrl) return null;
   let html = '';
   try {
-    const tryHtml = async (url, unwrap) => {
-      const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });
-      if (!resp.ok) throw new Error('not ok');
-      const txt = await resp.text();
-      return unwrap ? JSON.parse(txt).contents || '' : txt;
-    };
-    html = await Promise.any([
-      tryHtml('https://cors-get-proxy.sirjosh.workers.dev/?url=' + encodeURIComponent(pageUrl), false),
-      tryHtml('https://api.allorigins.win/get?url=' + encodeURIComponent(pageUrl), true),
-    ]);
+    html = await fetchCorsHtml(pageUrl);
   } catch { return null; }
   if (!html) return null;
   const m = html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i)
@@ -283,13 +270,7 @@ async function fetchOgImageUrl(pageUrl) {
 
 // Master function: fetch cert image for any grading company
 async function fetchCertPhoto(company, certNumber) {
-  // 1) Try direct image URL (PSA etc.)
-  const directUrl = getCertImageUrl(company, certNumber);
-  if (directUrl) {
-    const result = await fetchCertImageAsDataUrl(directUrl);
-    if (result) return result;
-  }
-  // 2) Try BRG S3 image from cert page parsing
+  // 1) Try BRG S3 image from cert page parsing
   if (company === 'BRG') {
     const info = await fetchCertInfo('BRG', certNumber);
     if (info && info.imageUrl) {
@@ -297,7 +278,15 @@ async function fetchCertPhoto(company, certNumber) {
       if (result) return result;
     }
   }
-  // 3) Try og:image from cert page (BGS, SGC, CGC etc.)
+  // 2) For PSA/BGS etc.: try to get image URL from parsed cert page
+  if (company === 'PSA' || company === 'BGS' || company === 'SGC' || company === 'CGC') {
+    const info = await fetchCertInfo(company, certNumber);
+    if (info && info.imageUrl) {
+      const result = await fetchCertImageAsDataUrl(info.imageUrl);
+      if (result) return result;
+    }
+  }
+  // 3) Try og:image from cert page (fallback)
   const pageUrl = getCertPageUrl(company, certNumber);
   const ogUrl = await fetchOgImageUrl(pageUrl);
   if (ogUrl) {
@@ -307,27 +296,41 @@ async function fetchCertPhoto(company, certNumber) {
   return null;
 }
 
-// ─── v35: Fetch card info (name, grade, POP, estimate) from cert page ───
+// ─── v36: Fetch card info (name, grade, POP, estimate) from cert page ───
+function isCloudflareChallenge(html) {
+  return html.includes('Just a moment') || html.includes('_cf_chl') || html.includes('challenge-platform');
+}
+
+async function fetchCorsHtml(pageUrl) {
+  const tryHtml = async (url, unwrap) => {
+    const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    if (!resp.ok) throw new Error('not ok');
+    const txt = await resp.text();
+    const html = unwrap ? JSON.parse(txt).contents || '' : txt;
+    if (isCloudflareChallenge(html)) throw new Error('cloudflare');
+    return html;
+  };
+  return Promise.any([
+    tryHtml('https://cors-get-proxy.sirjosh.workers.dev/?url=' + encodeURIComponent(pageUrl), false),
+    tryHtml('https://api.allorigins.win/get?url=' + encodeURIComponent(pageUrl), true),
+    tryHtml('https://api.allorigins.win/raw?url=' + encodeURIComponent(pageUrl), false),
+    tryHtml('https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(pageUrl), false),
+  ]);
+}
+
 async function fetchCertInfo(company, certNum) {
   // BRG: direct JSON API
   if (company === 'BRG') return fetchBrgCertApi(certNum);
   const pageUrl = getCertPageUrl(company, certNum);
   if (!pageUrl) return null;
-  // Race multiple CORS proxies for HTML fetch
   let html = '';
   try {
-    const tryHtml = async (url, unwrap) => {
-      const resp = await fetch(url, { signal: AbortSignal.timeout(15000) });
-      if (!resp.ok) throw new Error('not ok');
-      const txt = await resp.text();
-      return unwrap ? JSON.parse(txt).contents || '' : txt;
-    };
-    html = await Promise.any([
-      tryHtml('https://cors-get-proxy.sirjosh.workers.dev/?url=' + encodeURIComponent(pageUrl), false),
-      tryHtml('https://api.allorigins.win/get?url=' + encodeURIComponent(pageUrl), true),
-    ]);
-  } catch { return null; }
-  if (!html) return null;
+    html = await fetchCorsHtml(pageUrl);
+  } catch(err) {
+    // All proxies failed — likely Cloudflare block
+    return { error: 'cloudflare', pageUrl };
+  }
+  if (!html) return { error: 'cloudflare', pageUrl };
   if (company === 'PSA') return parsePsaCertHtml(html);
   if (company === 'BGS') return parseBgsCertHtml(html);
   return parseGenericCertHtml(html, company);
@@ -370,6 +373,17 @@ function parsePsaCertHtml(html) {
   // Category
   const catM = html.match(/Category<\/(?:span|div|th|td)>\s*<(?:span|div|th|td)[^>]*>\s*([^<]+)/i);
   if (catM) info.category = catM[1].trim();
+  // Extract cert image URLs from HTML (PSA uses internal IDs + hash filenames)
+  const certImgs = [...html.matchAll(/https?:\/\/d1htnxwo4o0jhw\.cloudfront\.net\/cert\/[^"'\s)]+/g)]
+    .map(m => m[0].replace(/\/small\//, '/'));
+  if (certImgs.length > 0) info.imageUrl = certImgs[0];
+  if (certImgs.length > 1) info.imageUrl2 = certImgs[1];
+  // og:image fallback
+  if (!info.imageUrl) {
+    const ogImg = html.match(/<meta[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i)
+      || html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["']/i);
+    if (ogImg) info.imageUrl = ogImg[1];
+  }
   return info;
 }
 
@@ -1699,6 +1713,7 @@ function CardForm({ card, onSave, onCancel }) {
                 setCertInfo(info);
                 setCertInfoLoading(false);
                 if (!info) { alert('카드 정보를 가져올 수 없습니다.'); return; }
+                if (info.error === 'cloudflare') return; // UI will show fallback message
                 // Auto-fill fields
                 if (info.name && !name.trim()) setName(info.name);
                 if (info.gradeLabel) {
@@ -1711,7 +1726,20 @@ function CardForm({ card, onSave, onCancel }) {
               </button>
             )}
             {/* Show fetched cert info */}
-            {certInfo && (
+            {certInfo && certInfo.error === 'cloudflare' && (
+              <div style={{ marginTop: 8, background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.3)', borderRadius: 10, padding: 12 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: '#fbbf24', marginBottom: 6 }}>⚠️ {gradeCompany} 자동 조회 일시 불가</div>
+                <div style={{ fontSize: 11, color: '#d1d5db', marginBottom: 8, lineHeight: 1.5 }}>
+                  {gradeCompany} 사이트의 보안(Cloudflare)으로 인해 자동 조회가 차단되었습니다.<br/>
+                  아래 버튼으로 직접 조회 페이지를 열어 정보를 확인해주세요.
+                </div>
+                <button type="button" onClick={() => window.open(certInfo.pageUrl || getCertPageUrl(gradeCompany, certNumber), '_blank')}
+                  style={{ padding: '8px 14px', borderRadius: 8, border: '1px solid #6366f1', background: 'rgba(99,102,241,0.15)', color: '#a5b4fc', fontSize: 12, cursor: 'pointer', fontWeight: 600 }}>
+                  🔗 {gradeCompany} 인증 페이지에서 직접 확인
+                </button>
+              </div>
+            )}
+            {certInfo && !certInfo.error && (
               <div style={{ marginTop: 8, background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.25)', borderRadius: 10, padding: 12 }}>
                 <div style={{ fontSize: 12, fontWeight: 700, color: '#a5b4fc', marginBottom: 6 }}>📋 {gradeCompany} 인증 정보</div>
                 {certInfo.name && <div style={{ fontSize: 12, color: '#e2e8f0', marginBottom: 4 }}>📛 <strong>{certInfo.name}</strong></div>}
@@ -1733,14 +1761,6 @@ function CardForm({ card, onSave, onCancel }) {
                       style={{ padding: '4px 10px', borderRadius: 6, border: '1px solid #475569', background: 'rgba(71,85,105,0.3)', color: '#e2e8f0', fontSize: 11, cursor: 'pointer' }}>시세 적용</button>
                   )}
                 </div>
-              </div>
-            )}
-            {certNumber.trim() && getCertImageUrl(gradeCompany, certNumber) && (
-              <div style={{ marginTop: 8 }}>
-                <div style={{ fontSize: 11, color: '#64748b', marginBottom: 4 }}>📸 {gradeCompany} 인증 이미지 미리보기:</div>
-                <img src={getCertImageUrl(gradeCompany, certNumber)} alt="cert" onLoad={() => setCertImgOk(true)} onError={() => setCertImgOk(false)}
-                  style={{ maxHeight: 180, borderRadius: 8, border: '1px solid #334155' }} />
-                {certImgOk && !photo && <div style={{ fontSize: 11, color: '#34d399', marginTop: 4 }}>✅ 인증 이미지 로드 완료</div>}
               </div>
             )}
             {certNumber.trim() && getCertPageUrl(gradeCompany, certNumber) && (
