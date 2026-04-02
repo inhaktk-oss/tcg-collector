@@ -916,6 +916,8 @@ const CARD_STATUSES = [
 const SORT_OPTIONS = [
   { value: 'newest', label: '최근 등록순' },
   { value: 'oldest', label: '오래된순' },
+  { value: 'buy-newest', label: '구입 최신순' },
+  { value: 'buy-oldest', label: '구입 오래된순' },
   { value: 'price-high', label: '구매가 높은순' },
   { value: 'price-low', label: '구매가 낮은순' },
   { value: 'value-high', label: '시세 높은순' },
@@ -1255,6 +1257,8 @@ function App() {
     }
     switch (sort) {
       case 'oldest': list.sort((a, b) => a.createdAt - b.createdAt); break;
+      case 'buy-newest': list.sort((a, b) => (b.purchaseDate || '').localeCompare(a.purchaseDate || '')); break;
+      case 'buy-oldest': list.sort((a, b) => (a.purchaseDate || '').localeCompare(b.purchaseDate || '')); break;
       case 'price-high': list.sort((a, b) => (b.price || 0) - (a.price || 0)); break;
       case 'price-low': list.sort((a, b) => (a.price || 0) - (b.price || 0)); break;
       case 'value-high': list.sort((a, b) => (b.currentValue || 0) - (a.currentValue || 0)); break;
