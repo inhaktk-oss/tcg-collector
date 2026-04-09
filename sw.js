@@ -1,4 +1,4 @@
-const CACHE = 'tcg-v52';
+const CACHE = 'tcg-v53';
 const ASSETS = ['./index.html', './manifest.json'];
 
 self.addEventListener('install', e => {

@@ -1274,10 +1274,12 @@ function App() {
     return syncCards;
   }
 
-  // Helper: save merged cards to BOTH React state AND localStorage synchronously
-  function saveMergedCards(merged) {
-    saveCards(merged);      // localStorage (no photos) + IndexedDB (photos)
-    setCards(merged);       // React state — triggers re-render
+  // Helper: save merged cards to BOTH React state AND localStorage
+  async function saveMergedCards(merged) {
+    // Always restore photos from IndexedDB (localStorage never has photos after v50)
+    const withPhotos = await loadPhotosIntoCards(merged);
+    saveCards(withPhotos);      // localStorage (no photos) + IndexedDB (photos)
+    setCards(withPhotos);       // React state — triggers re-render
   }
 
   // Helper: get photo map from IndexedDB (for sync operations)
@@ -1335,7 +1337,7 @@ function App() {
       // 3b. Detect cards deleted on other devices
       merged = removeRemotelyDeleted(merged, remoteIdSet, getLastSyncTime());
       // 4. Save to localStorage + React state FIRST (before push)
-      saveMergedCards(merged);
+      await saveMergedCards(merged);
       // 5. Push merged result to Gist
       const syncPayload = await buildSyncPayload(merged);
       await writeGist(cfg.token, cfg.gistId, { cards: syncPayload, lastSync: Date.now() });
@@ -1374,7 +1376,7 @@ function App() {
           const remoteIdSet = new Set(remoteCards.map(c => c.id));
           merged = mergeCards(localCards, remoteWithPhotos);
           merged = removeRemotelyDeleted(merged, remoteIdSet, getLastSyncTime());
-          saveMergedCards(merged);
+          await saveMergedCards(merged);
         }
       } catch(e) { /* remote read failed — push local as-is */ }
       const syncPayload = await buildSyncPayload(merged);
@@ -1416,7 +1418,7 @@ function App() {
       let merged = mergeCards(localCards, remoteWithPhotos);
       // Detect cards deleted on other devices
       merged = removeRemotelyDeleted(merged, remoteIdSet, getLastSyncTime());
-      saveMergedCards(merged);
+      await saveMergedCards(merged);
       setLastSyncTime();
       if (!silent) { setSyncStatus('done'); setTimeout(() => setSyncStatus(''), 1500); }
     } catch(e) {
