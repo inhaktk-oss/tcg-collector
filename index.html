@@ -1167,7 +1167,7 @@ function App() {
   const [syncStatus, setSyncStatus] = useState('');
   const syncTimer = useRef(null);
 
-  useEffect(() => { saveCards(cards); }, [cards]);
+  useEffect(() => { if (photosLoaded) saveCards(cards); }, [cards, photosLoaded]);
   useEffect(() => { setPageSize(20); }, [filter, statusFilter, search]);
 
   // v31: Theme effect
