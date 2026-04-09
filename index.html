@@ -944,7 +944,111 @@ const SORT_OPTIONS = [
 function loadCards() {
   try { return JSON.parse(localStorage.getItem('tcg_cards') || '[]'); } catch { return []; }
 }
-function saveCards(cards) { localStorage.setItem('tcg_cards', JSON.stringify(cards)); }
+// --- IndexedDB Photo Storage (avoids localStorage 5MB quota) ---
+const PHOTO_DB_NAME = 'tcg_photos_db';
+const PHOTO_STORE = 'photos';
+function openPhotoDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(PHOTO_DB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(PHOTO_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function savePhotoIDB(id, photo) {
+  if (!photo) return;
+  const db = await openPhotoDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(PHOTO_STORE, 'readwrite');
+    tx.objectStore(PHOTO_STORE).put(photo, id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function getPhotoIDB(id) {
+  const db = await openPhotoDB();
+  return new Promise((resolve) => {
+    const tx = db.transaction(PHOTO_STORE, 'readonly');
+    const req = tx.objectStore(PHOTO_STORE).get(id);
+    req.onsuccess = () => resolve(req.result || '');
+    req.onerror = () => resolve('');
+  });
+}
+async function getAllPhotosIDB() {
+  const db = await openPhotoDB();
+  return new Promise((resolve) => {
+    const map = new Map();
+    const tx = db.transaction(PHOTO_STORE, 'readonly');
+    const store = tx.objectStore(PHOTO_STORE);
+    const req = store.openCursor();
+    req.onsuccess = (e) => {
+      const cursor = e.target.result;
+      if (cursor) { map.set(cursor.key, cursor.value); cursor.continue(); }
+      else resolve(map);
+    };
+    req.onerror = () => resolve(map);
+  });
+}
+async function deletePhotoIDB(id) {
+  const db = await openPhotoDB();
+  return new Promise((resolve) => {
+    const tx = db.transaction(PHOTO_STORE, 'readwrite');
+    tx.objectStore(PHOTO_STORE).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => resolve();
+  });
+}
+async function bulkSavePhotosIDB(entries) {
+  if (!entries.length) return;
+  const db = await openPhotoDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(PHOTO_STORE, 'readwrite');
+    const store = tx.objectStore(PHOTO_STORE);
+    for (const [id, photo] of entries) { if (photo) store.put(photo, id); }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+// Save cards: strip photos → localStorage (small), photos → IndexedDB (large)
+function saveCards(cards) {
+  const stripped = cards.map(c => { const { photo, ...rest } = c; return rest; });
+  try {
+    localStorage.setItem('tcg_cards', JSON.stringify(stripped));
+  } catch (e) {
+    // Fallback: if still too large, try without syncPhoto too
+    if (e.name === 'QuotaExceededError') {
+      const minimal = cards.map(c => { const { photo, syncPhoto, ...rest } = c; return rest; });
+      localStorage.setItem('tcg_cards', JSON.stringify(minimal));
+    }
+  }
+  // Save photos to IndexedDB (fire-and-forget)
+  const photoEntries = cards.filter(c => c.photo).map(c => [c.id, c.photo]);
+  if (photoEntries.length) bulkSavePhotosIDB(photoEntries).catch(() => {});
+}
+// Load photos from IndexedDB and merge into cards
+async function loadPhotosIntoCards(cards) {
+  const photoMap = await getAllPhotosIDB();
+  if (photoMap.size === 0) return cards;
+  return cards.map(c => photoMap.has(c.id) ? { ...c, photo: photoMap.get(c.id) } : c);
+}
+// Migrate: if existing localStorage cards have embedded photos, move to IndexedDB
+async function migratePhotosToIDB() {
+  const raw = localStorage.getItem('tcg_cards');
+  if (!raw) return;
+  try {
+    const cards = JSON.parse(raw);
+    const withPhotos = cards.filter(c => c.photo && c.photo.startsWith('data:'));
+    if (withPhotos.length === 0) return; // Already migrated or no photos
+    // Move photos to IndexedDB
+    await bulkSavePhotosIDB(withPhotos.map(c => [c.id, c.photo]));
+    // Re-save cards without photos
+    const stripped = cards.map(c => { const { photo, ...rest } = c; return rest; });
+    localStorage.setItem('tcg_cards', JSON.stringify(stripped));
+    console.log('[Migration] Moved ' + withPhotos.length + ' photos to IndexedDB');
+  } catch (e) {
+    console.error('[Migration] Error:', e);
+  }
+}
 
 function formatPrice(n) {
   if (!n && n !== 0) return '-';
@@ -956,7 +1060,8 @@ function formatDate(d) {
 }
 function backupCards() {
   const cards = loadCards();
-  localStorage.setItem('tcg_cards_backup', JSON.stringify({ cards, timestamp: Date.now() }));
+  const stripped = cards.map(c => { const { photo, ...rest } = c; return rest; });
+  try { localStorage.setItem('tcg_cards_backup', JSON.stringify({ cards: stripped, timestamp: Date.now() })); } catch {}
 }
 function getBackup() {
   try { return JSON.parse(localStorage.getItem('tcg_cards_backup') || 'null'); } catch { return null; }
@@ -1032,6 +1137,7 @@ function LazyImage({ src, alt, className, style }) {
 
 function App() {
   const [cards, setCards] = useState(loadCards);
+  const [photosLoaded, setPhotosLoaded] = useState(false);
   const [screen, setScreen] = useState('list'); // list, add, detail, edit, sync
   const [selectedCard, setSelectedCard] = useState(null);
   const [editCard, setEditCard] = useState(null);
@@ -1048,6 +1154,15 @@ function App() {
 
   // Check local proxy on mount
   useEffect(() => { checkLocalProxy(); }, []);
+  // Migrate photos from localStorage to IndexedDB, then load them
+  useEffect(() => {
+    (async () => {
+      await migratePhotosToIDB();
+      const withPhotos = await loadPhotosIntoCards(loadCards());
+      setCards(withPhotos);
+      setPhotosLoaded(true);
+    })();
+  }, []);
   const [compareIds, setCompareIds] = useState([]);
   const [syncStatus, setSyncStatus] = useState('');
   const syncTimer = useRef(null);
@@ -1133,8 +1248,16 @@ function App() {
 
   // Helper: save merged cards to BOTH React state AND localStorage synchronously
   function saveMergedCards(merged) {
-    saveCards(merged);      // localStorage — immediate
+    saveCards(merged);      // localStorage (no photos) + IndexedDB (photos)
     setCards(merged);       // React state — triggers re-render
+  }
+
+  // Helper: get photo map from IndexedDB (for sync operations)
+  async function getLocalPhotoMap() {
+    const idbPhotos = await getAllPhotosIDB();
+    // Also include any in-memory photos from current cards state
+    for (const c of cards) { if (c.photo && !idbPhotos.has(c.id)) idbPhotos.set(c.id, c.photo); }
+    return idbPhotos;
   }
 
   // Ensure Gist connection exists, return config or null
@@ -1172,8 +1295,8 @@ function App() {
       const localCards = loadCards();
       const remote = await readGist(cfg.token, cfg.gistId);
       const remoteCards = remote?.cards || [];
-      // 2. Restore full-res photos from local, fallback to syncPhoto
-      const localPhotoMap = new Map(localCards.filter(c => c.photo).map(c => [c.id, c.photo]));
+      // 2. Restore full-res photos from local (IndexedDB), fallback to syncPhoto
+      const localPhotoMap = await getLocalPhotoMap();
       const remoteWithPhotos = remoteCards.map(c => {
         const { syncPhoto, ...data } = c;
         return { ...data, photo: localPhotoMap.get(c.id) || syncPhoto || '' };
@@ -1215,7 +1338,7 @@ function App() {
         const remote = await readGist(cfg.token, cfg.gistId);
         const remoteCards = remote?.cards || [];
         if (remoteCards.length > 0) {
-          const localPhotoMap = new Map(localCards.filter(c => c.photo).map(c => [c.id, c.photo]));
+          const localPhotoMap = await getLocalPhotoMap();
           const remoteWithPhotos = remoteCards.map(c => {
             const { syncPhoto, ...data } = c;
             return { ...data, photo: localPhotoMap.get(c.id) || syncPhoto || '' };
@@ -1256,7 +1379,7 @@ function App() {
         await pushToGist();
         return;
       }
-      const localPhotoMap = new Map(localCards.filter(c => c.photo).map(c => [c.id, c.photo]));
+      const localPhotoMap = await getLocalPhotoMap();
       const remoteWithPhotos = remoteCards.map(c => {
         const { syncPhoto, ...data } = c;
         return { ...data, photo: localPhotoMap.get(c.id) || syncPhoto || '' };
@@ -1332,6 +1455,7 @@ function App() {
   }
   function deleteCard(id) {
     addDeletedCardIds([id]);
+    deletePhotoIDB(id).catch(() => {});
     setCards(prev => prev.filter(c => c.id !== id));
     setSelectedCard(null);
     setShowDeleteConfirm(false);
@@ -2783,7 +2907,7 @@ function SyncScreen({ onBack, onSync, onPush, onPull, onRestore, cardCount }) {
                     return { ...d, photo: syncPhoto || d.photo || '' };
                   });
                   if (doMerge) {
-                    const localCards = JSON.parse(localStorage.getItem('tcg_cards') || '[]');
+                    const localCards = loadCards();
                     const merged = mergeCards(localCards, remoteCards).sort((a, b) => b.createdAt - a.createdAt);
                     onRestore(merged);
                     setStatus('✅ 병합 복구 완료! 현재 ' + localCards.length + '장 + 히스토리 ' + remoteCards.length + '장 → ' + merged.length + '장');
@@ -2881,8 +3005,23 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App />);
 window.addEventListener('error', function(e) {
   var root = document.getElementById('root');
   if (root && !root.hasChildNodes()) {
+    var isQuota = e.message && e.message.indexOf('QuotaExceeded') >= 0;
     root.innerHTML = '<div style="padding:40px;color:#f87171;font-family:sans-serif;text-align:center">' +
       '<h2>앱 로딩 오류</h2><p>' + (e.message || '알 수 없는 오류') + '</p>' +
+      (isQuota ? '<p style="color:#fbbf24;font-size:14px">📦 사진 데이터가 용량을 초과했습니다. 아래 버튼으로 복구합니다.</p>' +
+        '<button onclick="(async function(){try{' +
+        'var r=indexedDB.open(\'tcg_photos_db\',1);r.onupgradeneeded=function(){r.result.createObjectStore(\'photos\')};' +
+        'r.onsuccess=async function(){var db=r.result;var cards=JSON.parse(localStorage.getItem(\'tcg_cards\')||\'[]\');' +
+        'var ph=cards.filter(function(c){return c.photo&&c.photo.length>100});' +
+        'if(ph.length){var tx=db.transaction(\'photos\',\'readwrite\');var s=tx.objectStore(\'photos\');' +
+        'ph.forEach(function(c){s.put(c.photo,c.id)});' +
+        'var stripped=cards.map(function(c){var p=c.photo;delete c.photo;return c});' +
+        'localStorage.setItem(\'tcg_cards\',JSON.stringify(stripped));' +
+        'alert(ph.length+\'장 사진을 IndexedDB로 이전했습니다. 새로고침합니다.\');location.reload()}' +
+        'else{alert(\'이전할 사진이 없습니다. 캐시를 삭제합니다.\');caches.keys().then(function(k){return Promise.all(k.map(function(c){return caches.delete(c)}))}).then(function(){location.reload()})}}' +
+        '}catch(err){alert(\'복구 실패: \'+err.message);location.reload()}})()" ' +
+        'style="margin-top:16px;padding:12px 24px;background:#f59e0b;color:#1e293b;border:none;border-radius:8px;font-size:16px;cursor:pointer;font-weight:700">' +
+        '🔧 사진 데이터 복구</button><br>' : '') +
       '<button onclick="caches.keys().then(k=>Promise.all(k.map(c=>caches.delete(c)))).then(()=>location.reload())" ' +
       'style="margin-top:16px;padding:12px 24px;background:#6366f1;color:white;border:none;border-radius:8px;font-size:16px;cursor:pointer">' +
       '캐시 삭제 후 새로고침</button></div>';
