@@ -216,8 +216,12 @@ function mergeCards(local, remote) {
       if (remoteTime > localTime) {
         // Remote is newer — keep remote data but preserve local full-res photo
         map.set(c.id, { ...c, photo: existing.photo || c.photo || '' });
+      } else {
+        // Local is newer — keep local data but preserve photo from remote if local has none
+        if (!existing.photo && c.photo) {
+          map.set(c.id, { ...existing, photo: c.photo });
+        }
       }
-      // else keep local (already in map)
     }
   }
   return Array.from(map.values()).sort((a, b) => b.createdAt - a.createdAt);
