@@ -1338,7 +1338,8 @@ function App() {
       merged = removeRemotelyDeleted(merged, remoteIdSet, getLastSyncTime());
       // 4. Save to localStorage + React state FIRST (before push)
       await saveMergedCards(merged);
-      // 5. Push merged result to Gist
+      // 5. Restore photos from IndexedDB before building sync payload
+      merged = await loadPhotosIntoCards(merged);
       const syncPayload = await buildSyncPayload(merged);
       await writeGist(cfg.token, cfg.gistId, { cards: syncPayload, lastSync: Date.now() });
       clearDeletedCardIds(); // Deleted cards now removed from Gist too
@@ -1379,6 +1380,8 @@ function App() {
           await saveMergedCards(merged);
         }
       } catch(e) { /* remote read failed — push local as-is */ }
+      // Restore photos from IndexedDB before building sync payload
+      merged = await loadPhotosIntoCards(merged);
       const syncPayload = await buildSyncPayload(merged);
       await writeGist(cfg.token, cfg.gistId, { cards: syncPayload, lastSync: Date.now() });
       clearDeletedCardIds(); // Deleted cards now removed from Gist too
