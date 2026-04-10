@@ -1220,6 +1220,45 @@ function App() {
     }
   }, []);
 
+  // v55: Auto-recover missing cert photos after initial load + sync
+  useEffect(() => {
+    if (!photosLoaded) return;
+    const timer = setTimeout(async () => {
+      const missing = cards.filter(c => !c.photo && c.certNumber && getGradeCompanyFromGrade(c.grade));
+      if (missing.length === 0) return;
+      console.log('[PhotoRecovery] ' + missing.length + ' cards missing photos, attempting recovery...');
+      // 1) Try to recover from Gist syncPhoto first
+      const cfg = getSyncConfig();
+      let gistPhotos = new Map();
+      if (cfg?.token && cfg?.gistId) {
+        try {
+          const remote = await readGist(cfg.token, cfg.gistId);
+          for (const c of (remote?.cards || [])) {
+            if (c.syncPhoto) gistPhotos.set(c.id, c.syncPhoto);
+          }
+        } catch {}
+      }
+      let recovered = 0;
+      const updates = [];
+      for (const c of missing) {
+        let photo = gistPhotos.get(c.id) || '';
+        if (!photo) {
+          // 2) Try to re-fetch from grading company
+          try { photo = await fetchCertPhoto(getGradeCompanyFromGrade(c.grade), c.certNumber) || ''; } catch {}
+        }
+        if (photo) { updates.push({ id: c.id, photo }); recovered++; }
+      }
+      if (updates.length > 0) {
+        setCards(prev => prev.map(c => {
+          const u = updates.find(x => x.id === c.id);
+          return u ? { ...c, photo: u.photo } : c;
+        }));
+        console.log('[PhotoRecovery] Recovered ' + recovered + '/' + missing.length + ' photos');
+      }
+    }, 8000); // Wait for initial sync to complete
+    return () => clearTimeout(timer);
+  }, [photosLoaded]);
+
   // v31: Auto-sync after card changes (debounced)
   const autoSyncTimer = useRef(null);
   function scheduleAutoSync() {
@@ -1570,8 +1609,26 @@ function App() {
             style={{ width: '100%', maxHeight: 400, objectFit: 'contain', borderRadius: 12, background: '#334155', marginBottom: 16 }}
             onError={e => { e.target.style.display='none'; }} />
         ) : (
-          <div style={{ width: '100%', height: 250, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, #334155, #1e293b)', borderRadius: 12, fontSize: 80, marginBottom: 16 }}>
+          <div style={{ width: '100%', height: 250, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, #334155, #1e293b)', borderRadius: 12, fontSize: 80, marginBottom: 16, gap: 12 }}>
             {cat ? cat.emoji : '🎴'}
+            {selectedCard.certNumber && getGradeCompanyFromGrade(selectedCard.grade) && (
+              <button onClick={async () => {
+                const gc = getGradeCompanyFromGrade(selectedCard.grade);
+                setSyncStatus('📸 인증 이미지 복구 중...');
+                const dataUrl = await fetchCertPhoto(gc, selectedCard.certNumber);
+                if (dataUrl) {
+                  const updated = { ...selectedCard, photo: dataUrl, updatedAt: Date.now() };
+                  setCards(prev => prev.map(c => c.id === updated.id ? updated : c));
+                  setSelectedCard(updated);
+                  setSyncStatus('✅ 사진 복구 완료!');
+                } else {
+                  setSyncStatus('❌ 이미지를 가져올 수 없습니다');
+                }
+                setTimeout(() => setSyncStatus(''), 2000);
+              }} style={{ padding: '8px 16px', borderRadius: 8, border: '1px solid #34d399', background: 'rgba(52,211,153,0.15)', color: '#34d399', fontSize: 13, cursor: 'pointer', fontWeight: 600 }}>
+                📸 인증 이미지 복구
+              </button>
+            )}
           </div>
         )}
 
