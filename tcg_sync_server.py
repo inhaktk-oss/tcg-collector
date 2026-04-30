@@ -11,7 +11,7 @@ Env vars:
   TCG_DATA_DIR    — data directory (default: ~/tcg-data)
   TCG_PORT        — port (default: 8082)
 """
-import os, json, time, sqlite3, hashlib, base64, hmac, re
+import os, json, time, sqlite3, hashlib, base64, hmac, re, gzip
 from pathlib import Path
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -144,9 +144,38 @@ class SyncHandler(SimpleHTTPRequestHandler):
         if path.startswith('/api/photos/'):
             return self._handle_get_photo(path)
 
-        # Static files — serve TCG app
+        # Static files — serve TCG app with gzip + caching
         if path == '/' or path == '':
             self.path = '/index.html'
+        # Serve with gzip compression for text files
+        file_path = STATIC_DIR / self.path.lstrip('/')
+        if file_path.exists() and file_path.is_file():
+            ext = file_path.suffix.lower()
+            if ext in ('.html', '.js', '.css', '.json', '.svg'):
+                data = file_path.read_bytes()
+                accept_enc = self.headers.get('Accept-Encoding', '')
+                if 'gzip' in accept_enc and len(data) > 1024:
+                    compressed = gzip.compress(data, compresslevel=6)
+                    self.send_response(200)
+                    self._cors_headers()
+                    ct = {'html': 'text/html', 'js': 'application/javascript', 'css': 'text/css', 'json': 'application/json', 'svg': 'image/svg+xml'}
+                    self.send_header('Content-Type', ct.get(ext[1:], 'application/octet-stream') + '; charset=utf-8')
+                    self.send_header('Content-Encoding', 'gzip')
+                    self.send_header('Content-Length', str(len(compressed)))
+                    self.send_header('Cache-Control', 'public, max-age=300')
+                    self.end_headers()
+                    self.wfile.write(compressed)
+                    return
+                else:
+                    self.send_response(200)
+                    self._cors_headers()
+                    ct = {'html': 'text/html', 'js': 'application/javascript', 'css': 'text/css', 'json': 'application/json'}
+                    self.send_header('Content-Type', ct.get(ext[1:], 'application/octet-stream') + '; charset=utf-8')
+                    self.send_header('Content-Length', str(len(data)))
+                    self.send_header('Cache-Control', 'public, max-age=300')
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
         super().do_GET()
 
     def do_POST(self):
