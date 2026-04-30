@@ -1,0 +1,16 @@
+[Unit]
+Description=TCG Collection Sync Server
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opc
+WorkingDirectory=/home/opc/tcg-sync
+ExecStart=/home/opc/tcg-sync/.venv/bin/python3 /home/opc/tcg-sync/tcg_sync_server.py
+Restart=always
+RestartSec=10
+EnvironmentFile=/home/opc/tcg-sync/.env
+
+[Install]
+WantedBy=multi-user.target

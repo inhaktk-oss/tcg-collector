@@ -131,6 +131,74 @@ if ('serviceWorker' in navigator) {
 <script type="text/babel">
 const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
+// ─── Server Sync Config ───
+function getServerConfig() {
+  try { return JSON.parse(localStorage.getItem('tcg_server_config') || 'null'); } catch { return null; }
+}
+function saveServerConfig(cfg) { localStorage.setItem('tcg_server_config', JSON.stringify(cfg)); }
+function getSyncMode() {
+  const server = getServerConfig();
+  if (server?.url && server?.token) return 'server';
+  const gist = getSyncConfig();
+  if (gist?.token) return 'gist';
+  return null;
+}
+
+// ─── Server Sync API ───
+async function serverAPI(path, opts = {}) {
+  const cfg = getServerConfig();
+  if (!cfg?.url || !cfg?.token) throw new Error('Server not configured');
+  const url = cfg.url.replace(/\/$/, '') + path;
+  const res = await fetch(url, {
+    ...opts,
+    headers: {
+      'Authorization': 'Bearer ' + cfg.token,
+      'Content-Type': 'application/json',
+      ...(opts.headers || {}),
+    },
+  });
+  if (!res.ok) throw new Error('Server API ' + res.status);
+  return res.json();
+}
+async function serverHealth() {
+  return serverAPI('/api/health');
+}
+async function serverGetCards() {
+  return serverAPI('/api/cards');
+}
+async function serverSyncCards(cards, deletedIds) {
+  return serverAPI('/api/cards/sync', {
+    method: 'POST',
+    body: JSON.stringify({ cards, deletedIds }),
+  });
+}
+async function serverUploadPhoto(cardId, dataUrl) {
+  return serverAPI('/api/photos/' + encodeURIComponent(cardId), {
+    method: 'POST',
+    body: JSON.stringify({ photo: dataUrl }),
+  });
+}
+async function serverGetPhotoIds() {
+  return serverAPI('/api/photos/list');
+}
+async function serverGetPhotoUrl(cardId) {
+  const cfg = getServerConfig();
+  return cfg.url.replace(/\/$/, '') + '/api/photos/' + encodeURIComponent(cardId);
+}
+async function serverDownloadPhoto(cardId) {
+  const cfg = getServerConfig();
+  const url = cfg.url.replace(/\/$/, '') + '/api/photos/' + encodeURIComponent(cardId);
+  const res = await fetch(url, { headers: { 'Authorization': 'Bearer ' + cfg.token } });
+  if (!res.ok) return '';
+  const blob = await res.blob();
+  return new Promise(resolve => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => resolve('');
+    reader.readAsDataURL(blob);
+  });
+}
+
 // ─── Gist Cloud Sync ───
 const GIST_FILENAME = 'tcg_collection_sync.json';
 function getSyncConfig() {
@@ -1213,10 +1281,12 @@ function App() {
 
   // v31: Auto-sync on app start
   useEffect(() => {
-    const cfg = getSyncConfig();
-    if (cfg?.token && cfg?.gistId) {
-      // Silent pull on app open
-      pullFromGist(true);
+    const mode = getSyncMode();
+    if (mode === 'server') {
+      doServerPull(true);
+    } else if (mode === 'gist') {
+      const cfg = getSyncConfig();
+      if (cfg?.token && cfg?.gistId) pullFromGist(true);
     }
   }, []);
 
@@ -1264,8 +1334,9 @@ function App() {
   function scheduleAutoSync() {
     if (autoSyncTimer.current) clearTimeout(autoSyncTimer.current);
     autoSyncTimer.current = setTimeout(() => {
-      const cfg = getSyncConfig();
-      if (cfg?.token && cfg?.gistId) pushToGist();
+      const mode = getSyncMode();
+      if (mode === 'server') doServerPush();
+      else if (mode === 'gist') { const cfg = getSyncConfig(); if (cfg?.token && cfg?.gistId) pushToGist(); }
     }, 5000);
   }
 
@@ -1473,6 +1544,138 @@ function App() {
     } finally { syncingRef.current = false; }
   }
 
+  // ═══ Server Sync Functions ═══
+  async function doServerSync() {
+    if (syncingRef.current) return;
+    syncingRef.current = true;
+    backupCards();
+    try {
+      setSyncStatus('syncing');
+      const localCards = loadCards();
+      const deletedIds = getDeletedCardIds();
+      // Build sync payload with compressed photos
+      const cardsWithPhotos = await loadPhotosIntoCards(localCards);
+      const syncCards = [];
+      for (const c of cardsWithPhotos) {
+        const { photo, ...data } = c;
+        const compressed = (photo && photo.startsWith('data:')) ? await compressPhoto(photo) : '';
+        syncCards.push({ ...data, syncPhoto: compressed });
+      }
+      // Server merges and returns result
+      const result = await serverSyncCards(syncCards, deletedIds);
+      const mergedCards = result.cards || [];
+      // Restore local full-res photos
+      const localPhotoMap = await getLocalPhotoMap();
+      const withPhotos = mergedCards.map(c => ({
+        ...c,
+        photo: localPhotoMap.get(c.id) || '',
+      }));
+      await saveMergedCards(withPhotos);
+      clearDeletedCardIds();
+      setLastSyncTime();
+      // Download missing photos from server
+      try {
+        const { photoIds } = await serverGetPhotoIds();
+        const serverPhotoSet = new Set(photoIds);
+        for (const c of withPhotos) {
+          if (!c.photo && serverPhotoSet.has(c.id)) {
+            try {
+              const dataUrl = await serverDownloadPhoto(c.id);
+              if (dataUrl) await savePhotoIDB(c.id, dataUrl);
+            } catch(e) { /* skip */ }
+          }
+        }
+      } catch(e) { /* photo list failed, skip */ }
+      setSyncStatus('done');
+      setTimeout(() => setSyncStatus(''), 1500);
+    } catch(e) {
+      console.error('Server sync error:', e);
+      setSyncStatus('error');
+      setTimeout(() => setSyncStatus(''), 3000);
+    } finally { syncingRef.current = false; }
+  }
+
+  async function doServerPush(silent) {
+    if (syncingRef.current) return;
+    syncingRef.current = true;
+    try {
+      if (!silent) setSyncStatus('syncing');
+      const localCards = loadCards();
+      const deletedIds = getDeletedCardIds();
+      const cardsWithPhotos = await loadPhotosIntoCards(localCards);
+      const syncCards = [];
+      for (const c of cardsWithPhotos) {
+        const { photo, ...data } = c;
+        const compressed = (photo && photo.startsWith('data:')) ? await compressPhoto(photo) : '';
+        syncCards.push({ ...data, syncPhoto: compressed });
+      }
+      await serverSyncCards(syncCards, deletedIds);
+      clearDeletedCardIds();
+      setLastSyncTime();
+      if (!silent) { setSyncStatus('done'); setTimeout(() => setSyncStatus(''), 1500); }
+    } catch(e) {
+      console.error('Server push error:', e);
+      if (!silent) { setSyncStatus('error'); setTimeout(() => setSyncStatus(''), 3000); }
+    } finally { syncingRef.current = false; }
+  }
+
+  async function doServerPull(silent) {
+    if (syncingRef.current) return;
+    syncingRef.current = true;
+    if (!silent) backupCards();
+    try {
+      if (!silent) setSyncStatus('syncing');
+      const result = await serverGetCards();
+      const remoteCards = result.cards || [];
+      const localCards = loadCards();
+      if (remoteCards.length === 0 && localCards.length > 0) {
+        syncingRef.current = false;
+        await doServerPush(silent);
+        return;
+      }
+      const localPhotoMap = await getLocalPhotoMap();
+      const remoteWithPhotos = remoteCards.map(c => ({
+        ...c, photo: localPhotoMap.get(c.id) || '',
+      }));
+      const remoteIdSet = new Set(remoteCards.map(c => c.id));
+      let merged = mergeCards(localCards, remoteWithPhotos);
+      merged = removeRemotelyDeleted(merged, remoteIdSet, getLastSyncTime());
+      await saveMergedCards(merged);
+      setLastSyncTime();
+      // Download missing photos
+      for (const c of merged) {
+        if (!c.photo && remoteCards.find(r => r.id === c.id)?.hasServerPhoto) {
+          try {
+            const dataUrl = await serverDownloadPhoto(c.id);
+            if (dataUrl) await savePhotoIDB(c.id, dataUrl);
+          } catch(e) { /* skip */ }
+        }
+      }
+      if (!silent) { setSyncStatus('done'); setTimeout(() => setSyncStatus(''), 1500); }
+    } catch(e) {
+      console.error('Server pull error:', e);
+      if (!silent) { setSyncStatus('error'); setTimeout(() => setSyncStatus(''), 3000); }
+    } finally { syncingRef.current = false; }
+  }
+
+  // ═══ Unified sync dispatchers ═══
+  function doSyncAny() {
+    const mode = getSyncMode();
+    if (mode === 'server') return doServerSync();
+    if (mode === 'gist') return doSync();
+    setScreen('sync');
+  }
+  function doPushAny() {
+    const mode = getSyncMode();
+    if (mode === 'server') return doServerPush();
+    if (mode === 'gist') return pushToGist();
+  }
+  function doPullAny() {
+    const mode = getSyncMode();
+    if (mode === 'server') return doServerPull(false);
+    if (mode === 'gist') return pullFromGist(false);
+  }
+
   const filtered = useMemo(() => {
     let list = [...cards];
     if (filter !== 'all') list = list.filter(c => c.category === filter);
@@ -1593,7 +1796,7 @@ function App() {
   // ─── Screens ───
   if (screen === 'add') return <CardForm onSave={addCard} onCancel={() => setScreen('list')} />;
   if (screen === 'edit' && editCard) return <CardForm card={editCard} onSave={updateCard} onCancel={() => { setScreen('detail'); setEditCard(null); }} />;
-  if (screen === 'sync') return <SyncScreen onBack={() => setScreen('list')} onSync={doSync} onPush={pushToGist} onPull={() => pullFromGist(false)} onRestore={(restored) => saveMergedCards(restored)} cardCount={cards.length} />;
+  if (screen === 'sync') return <SyncScreen onBack={() => setScreen('list')} onSync={doSyncAny} onPush={doPushAny} onPull={doPullAny} onRestore={(restored) => saveMergedCards(restored)} cardCount={cards.length} onServerSync={doServerSync} onServerPush={() => doServerPush(false)} onServerPull={() => doServerPull(false)} />;
   if (screen === 'dashboard') return <Dashboard cards={cards} stats={stats} onClose={() => setScreen('list')} theme={theme} />;
   if (screen === 'compare') return <CompareView cards={cards} compareIds={compareIds} onClose={() => { setCompareIds([]); setScreen('list'); }} theme={theme} />;
   if (screen === 'detail' && selectedCard) {
@@ -1742,7 +1945,7 @@ function App() {
             {theme === 'dark' ? '☀️' : '🌙'}
           </button>
           <button className="btn btn-outline" style={{ padding: '8px 10px', fontSize: 13 }} onClick={() => setScreen('dashboard')} title="대시보드">📊</button>
-          <button className="btn btn-outline" style={{ padding: '8px 10px', fontSize: 13 }} onClick={doSync} title="클라우드 동기화">
+          <button className="btn btn-outline" style={{ padding: '8px 10px', fontSize: 13 }} onClick={doSyncAny} title="클라우드 동기화">
             {syncStatus === 'syncing' ? '⏳' : syncStatus === 'done' ? '✅' : syncStatus === 'error' ? '❌' : '☁️'}
           </button>
           <button className="btn btn-outline" style={{ padding: '8px 10px', fontSize: 13 }} onClick={() => setScreen('sync')} title="동기화 설정">⚙️</button>
@@ -2904,9 +3107,39 @@ function CompareView({ cards, compareIds, onClose, theme }) {
   );
 }
 
-function SyncScreen({ onBack, onSync, onPush, onPull, onRestore, cardCount }) {
+function SyncScreen({ onBack, onSync, onPush, onPull, onRestore, cardCount, onServerSync, onServerPush, onServerPull }) {
+  const [syncTab, setSyncTab] = useState(() => getSyncMode() === 'server' ? 'server' : 'gist');
   const [cfg, setCfg] = useState(getSyncConfig() || { token: '', gistId: '' });
+  const [serverCfg, setServerCfg] = useState(getServerConfig() || { url: '', token: '' });
   const [status, setStatus] = useState('');
+
+  // Server handlers
+  async function handleServerConnect() {
+    if (!serverCfg.url.trim() || !serverCfg.token.trim()) { alert('서버 URL과 토큰을 입력해주세요.'); return; }
+    setStatus('연결 중...');
+    try {
+      const tmpCfg = { url: serverCfg.url.trim().replace(/\/$/, ''), token: serverCfg.token.trim() };
+      // Test connection
+      const res = await fetch(tmpCfg.url + '/api/health', {
+        headers: { 'Authorization': 'Bearer ' + tmpCfg.token },
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      saveServerConfig(tmpCfg);
+      setServerCfg(tmpCfg);
+      setStatus(`✅ 연결 성공! (서버 카드 ${data.cards}장, 사진 ${data.photos}장) 동기화 중...`);
+      await onServerSync();
+      setStatus('✅ 동기화 완료!');
+    } catch(e) {
+      setStatus('❌ 연결 실패: ' + e.message);
+    }
+  }
+
+  function handleServerDisconnect() {
+    saveServerConfig(null);
+    setServerCfg({ url: '', token: '' });
+    setStatus('서버 연결 해제됨');
+  }
 
   async function handleSave() {
     if (!cfg.token.trim()) { alert('GitHub 토큰을 입력해주세요.'); return; }
@@ -2942,11 +3175,59 @@ function SyncScreen({ onBack, onSync, onPush, onPull, onRestore, cardCount }) {
     <div style={{ maxWidth: 500, margin: '0 auto', padding: 16 }}>
       <button onClick={onBack} style={{ background: 'none', border: 'none', fontSize: 15, cursor: 'pointer', color: '#94a3b8', marginBottom: 16 }}>← 돌아가기</button>
       <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 20 }}>☁️ 클라우드 동기화</h2>
-      
+
+      {/* ─── Sync Mode Tabs ─── */}
+      <div style={{ display: 'flex', marginBottom: 16, borderRadius: 10, overflow: 'hidden', border: '1px solid #334155' }}>
+        <button onClick={() => setSyncTab('server')} style={{ flex: 1, padding: '12px 0', fontSize: 14, fontWeight: 600, border: 'none', cursor: 'pointer', background: syncTab === 'server' ? '#6366f1' : '#1e293b', color: syncTab === 'server' ? '#fff' : '#94a3b8', transition: 'all 0.2s' }}>🖥️ 내 서버</button>
+        <button onClick={() => setSyncTab('gist')} style={{ flex: 1, padding: '12px 0', fontSize: 14, fontWeight: 600, border: 'none', cursor: 'pointer', background: syncTab === 'gist' ? '#6366f1' : '#1e293b', color: syncTab === 'gist' ? '#fff' : '#94a3b8', transition: 'all 0.2s' }}>🐙 GitHub Gist</button>
+      </div>
+
+      {/* ─── Server Sync Tab ─── */}
+      {syncTab === 'server' && (<>
+        <div style={{ background: '#1e293b', borderRadius: 12, padding: 16, marginBottom: 16, border: '1px solid #334155' }}>
+          <p style={{ fontSize: 13, color: '#94a3b8', marginBottom: 12, lineHeight: 1.6 }}>
+            전용 서버를 통해 카드 데이터를 동기화합니다.<br/>
+            <span style={{ color: '#34d399' }}>※ 사진 용량 제한 없음, 빠르고 안정적 동기화</span>
+          </p>
+
+          <label style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, display: 'block' }}>서버 URL</label>
+          <input type="url" value={serverCfg.url} onChange={e => setServerCfg(prev => ({ ...prev, url: e.target.value }))} placeholder="https://your-server:8082" style={{ marginBottom: 10 }} />
+
+          <label style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, display: 'block' }}>동기화 토큰</label>
+          <input type="password" value={serverCfg.token} onChange={e => setServerCfg(prev => ({ ...prev, token: e.target.value }))} placeholder="서버 설정 시 지정한 토큰" style={{ marginBottom: 12 }} />
+
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn btn-primary" style={{ flex: 1 }} onClick={handleServerConnect}>연결</button>
+            {serverCfg.url && serverCfg.token && <button className="btn btn-outline" onClick={handleServerDisconnect}>해제</button>}
+          </div>
+
+          {status && <p style={{ fontSize: 13, marginTop: 8, color: status.includes('❌') ? '#ef4444' : '#34d399' }}>{status}</p>}
+        </div>
+
+        {getServerConfig()?.url && (<div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 13, color: '#34d399', marginBottom: 8 }}>✅ 서버 연결됨</div>
+          <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 8 }}>📱 이 기기 카드: {cardCount}장</div>
+          <button className="btn btn-primary" style={{ width: '100%', padding: 14, fontSize: 16, marginBottom: 8 }} onClick={async () => { setStatus('동기화 중...'); await onServerSync(); setStatus('✅ 동기화 완료!'); }}>
+            🔄 지금 동기화
+          </button>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+            <button className="btn btn-outline" style={{ flex: 1, padding: 10, fontSize: 13 }} onClick={async () => { setStatus('⬆️ 업로드 중...'); await onServerPush(); setStatus('✅ 업로드 완료!'); }}>
+              ⬆️ 이 기기→서버
+            </button>
+            <button className="btn btn-outline" style={{ flex: 1, padding: 10, fontSize: 13 }} onClick={async () => { setStatus('⬇️ 다운로드 중...'); await onServerPull(); setStatus('✅ 다운로드 완료!'); }}>
+              ⬇️ 서버→이 기기
+            </button>
+          </div>
+        </div>)}
+      </>)}
+
+      {/* ─── Gist Sync Tab ─── */}
+      {syncTab === 'gist' && (<>
       <div style={{ background: '#1e293b', borderRadius: 12, padding: 16, marginBottom: 16, border: '1px solid #334155' }}>
         <p style={{ fontSize: 13, color: '#94a3b8', marginBottom: 12, lineHeight: 1.6 }}>
           GitHub Gist를 통해 여러 기기에서 카드 데이터를 동기화합니다.<br/>
-          <span style={{ color: '#34d399' }}>※ 사진도 축소 버전으로 동기화됩니다 (원본은 기기별 로컬 저장)</span>
+          <span style={{ color: '#34d399' }}>※ 사진도 축소 버전으로 동기화됩니다 (원본은 기기별 로컬 저장)</span><br/>
+          <span style={{ color: '#f59e0b' }}>⚠️ 카드 1000장 이상 시 용량 한계로 동기화 실패 가능 → 내 서버 권장</span>
         </p>
         
         <label style={{ fontSize: 13, color: '#94a3b8', marginBottom: 4, display: 'block' }}>GitHub Personal Access Token (gist 권한)</label>
@@ -3022,6 +3303,7 @@ function SyncScreen({ onBack, onSync, onPush, onPull, onRestore, cardCount }) {
           </button>
         </div>
       )}
+      </>)}
 
       {/* Local Backup */}
       <div style={{ background: '#1e293b', borderRadius: 12, padding: 16, marginBottom: 16, border: '1px solid #334155' }}>
