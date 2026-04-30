@@ -1796,7 +1796,7 @@ function App() {
   // ─── Screens ───
   if (screen === 'add') return <CardForm onSave={addCard} onCancel={() => setScreen('list')} />;
   if (screen === 'edit' && editCard) return <CardForm card={editCard} onSave={updateCard} onCancel={() => { setScreen('detail'); setEditCard(null); }} />;
-  if (screen === 'sync') return <SyncScreen onBack={() => setScreen('list')} onSync={doSyncAny} onPush={doPushAny} onPull={doPullAny} onRestore={(restored) => saveMergedCards(restored)} cardCount={cards.length} onServerSync={doServerSync} onServerPush={() => doServerPush(false)} onServerPull={() => doServerPull(false)} />;
+  if (screen === 'sync') return <SyncScreen onBack={() => setScreen('list')} onSync={doSyncAny} onPush={pushToGist} onPull={() => pullFromGist(false)} onGistSync={doSync} onRestore={(restored) => saveMergedCards(restored)} cardCount={cards.length} onServerSync={doServerSync} onServerPush={() => doServerPush(false)} onServerPull={() => doServerPull(false)} />;
   if (screen === 'dashboard') return <Dashboard cards={cards} stats={stats} onClose={() => setScreen('list')} theme={theme} />;
   if (screen === 'compare') return <CompareView cards={cards} compareIds={compareIds} onClose={() => { setCompareIds([]); setScreen('list'); }} theme={theme} />;
   if (screen === 'detail' && selectedCard) {
@@ -3107,7 +3107,7 @@ function CompareView({ cards, compareIds, onClose, theme }) {
   );
 }
 
-function SyncScreen({ onBack, onSync, onPush, onPull, onRestore, cardCount, onServerSync, onServerPush, onServerPull }) {
+function SyncScreen({ onBack, onSync, onPush, onPull, onGistSync, onRestore, cardCount, onServerSync, onServerPush, onServerPull }) {
   const [syncTab, setSyncTab] = useState(() => getSyncMode() === 'server' ? 'server' : 'gist');
   const [cfg, setCfg] = useState(getSyncConfig() || { token: '', gistId: '' });
   const [serverCfg, setServerCfg] = useState(getServerConfig() || { url: '', token: '' });
@@ -3158,7 +3158,7 @@ function SyncScreen({ onBack, onSync, onPush, onPull, onRestore, cardCount, onSe
       setCfg(newCfg);
       setStatus('✅ 연결 성공! 동기화 중...');
       // Auto-sync immediately
-      await onSync();
+      await onGistSync();
       setStatus('✅ 동기화 완료!');
     } catch(e) {
       setStatus('❌ 토큰이 올바르지 않거나 네트워크 오류입니다.');
@@ -3245,7 +3245,7 @@ function SyncScreen({ onBack, onSync, onPush, onPull, onRestore, cardCount, onSe
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontSize: 13, color: '#34d399', marginBottom: 8 }}>✅ Gist 연결됨 (ID: {cfg.gistId.slice(0, 8)}...)</div>
           <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 8 }}>📱 이 기기 카드: {cardCount}장</div>
-          <button className="btn btn-primary" style={{ width: '100%', padding: 14, fontSize: 16, marginBottom: 8 }} onClick={async () => { setStatus('동기화 중...'); await onSync(); setStatus('✅ 동기화 완료!'); }}>
+          <button className="btn btn-primary" style={{ width: '100%', padding: 14, fontSize: 16, marginBottom: 8 }} onClick={async () => { setStatus('동기화 중...'); await onGistSync(); setStatus('✅ 동기화 완료!'); }}>
             🔄 지금 동기화
           </button>
           <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
