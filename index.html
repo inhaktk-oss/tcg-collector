@@ -94,10 +94,23 @@
 <body>
 <div id="root"></div>
 <script>
-// Force SW update & re-register
+// Force SW update & clear ALL old caches on every visit
 if ('serviceWorker' in navigator) {
+  // 1. Unregister old SW, clear all caches, re-register fresh
+  caches.keys().then(keys => {
+    var old = keys.filter(k => k !== 'tcg-v61');
+    if (old.length) Promise.all(old.map(k => caches.delete(k))).then(() => console.log('[SW] Cleared old caches:', old));
+  });
+  navigator.serviceWorker.getRegistrations().then(regs => {
+    regs.forEach(r => r.update());
+  });
   navigator.serviceWorker.register('./sw.js').then(reg => {
-    reg.update();
+    reg.addEventListener('updatefound', () => {
+      var nw = reg.installing;
+      if (nw) nw.addEventListener('statechange', () => {
+        if (nw.state === 'activated') location.reload();
+      });
+    });
   });
 }
 
