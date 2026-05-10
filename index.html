@@ -145,9 +145,27 @@ if ('serviceWorker' in navigator) {
 </script>
 <script>
 const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+// ─── Same-origin auto-detect ───
+// When app is served from the sync server itself, auto-fill server URL
+function _detectSameOriginServer() {
+  const loc = window.location;
+  // If served from the sync server (not GitHub Pages), use same origin
+  if (loc.hostname !== 'inhaktk-oss.github.io' && loc.hostname !== 'localhost') {
+    return loc.origin;  // e.g. http://168.107.63.60:8082
+  }
+  return null;
+}
+const SAME_ORIGIN_URL = _detectSameOriginServer();
+
 function getServerConfig() {
   try {
-    return JSON.parse(localStorage.getItem("tcg_server_config") || "null");
+    const stored = JSON.parse(localStorage.getItem("tcg_server_config") || "null");
+    // If same-origin and token is set, auto-fill URL
+    if (SAME_ORIGIN_URL && stored?.token && !stored?.url) {
+      stored.url = SAME_ORIGIN_URL;
+    }
+    return stored;
   } catch {
     return null;
   }
@@ -158,6 +176,8 @@ function saveServerConfig(cfg) {
 function getSyncMode() {
   const server = getServerConfig();
   if (server?.url && server?.token) return "server";
+  // Same-origin: token only needed
+  if (SAME_ORIGIN_URL && server?.token) return "server";
   const gist = getSyncConfig();
   if (gist?.token) return "gist";
   return null;
@@ -2634,10 +2654,15 @@ function CompareView({ cards, compareIds, onClose, theme }) {
 function SyncScreen({ onBack, onSync, onPush, onPull, onGistSync, onRestore, cardCount, onServerSync, onServerPush, onServerPull }) {
   const [syncTab, setSyncTab] = useState(() => getSyncMode() === "server" ? "server" : "gist");
   const [cfg, setCfg] = useState(getSyncConfig() || { token: "", gistId: "" });
-  const [serverCfg, setServerCfg] = useState(getServerConfig() || { url: "", token: "" });
+  const [serverCfg, setServerCfg] = useState(() => {
+    const stored = getServerConfig() || { url: "", token: "" };
+    if (SAME_ORIGIN_URL && !stored.url) stored.url = SAME_ORIGIN_URL;
+    return stored;
+  });
   const [status, setStatus] = useState("");
   async function handleServerConnect() {
-    if (!serverCfg.url.trim() || !serverCfg.token.trim()) {
+    const urlToUse = serverCfg.url.trim() || SAME_ORIGIN_URL || "";
+    if (!urlToUse || !serverCfg.token.trim()) {
       alert("\uC11C\uBC84 URL\uACFC \uD1A0\uD070\uC744 \uC785\uB825\uD574\uC8FC\uC138\uC694.");
       return;
     }
